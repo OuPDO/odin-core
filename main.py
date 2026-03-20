@@ -22,13 +22,10 @@ async def lifespan(app: FastAPI):
     await bot_app.initialize()
     await bot_app.start()
 
-    if settings.odin_environment == "production":
-        # In production: use webhook mode
-        # The webhook URL will be set during deployment
-        pass
-    else:
-        # In dev: use polling
-        await bot_app.updater.start_polling(drop_pending_updates=True)
+    # Use polling mode — works reliably for single-user bot
+    # Webhook mode can be enabled later for lower latency
+    await bot_app.updater.start_polling(drop_pending_updates=True)
+    logger.info("Telegram Polling gestartet.")
 
     app.state.bot_app = bot_app
     logger.info("ODIN gestartet. Umgebung: %s", settings.odin_environment)
