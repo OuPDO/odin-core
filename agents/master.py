@@ -1,13 +1,7 @@
-"""ODIN Master — Central Router and Orchestrator.
-
-Routes incoming messages to the correct organization agent (OM, ADO, DO)
-based on signal words and context. Uses router model for fast classification,
-default model for generating responses.
-"""
+"""ODIN Master — Central Router and Orchestrator."""
 
 import logging
-from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, TypedDict
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, END
@@ -53,23 +47,19 @@ DO_SIGNALS = {
 }
 
 
-@dataclass
-class MasterState:
-    message: str = ""
-    user_id: str = ""
-    chat_id: str = ""
-    detected_org: str = ""
-    response: str = ""
+class MasterState(TypedDict, total=False):
+    message: str
+    user_id: str
+    chat_id: str
+    detected_org: str
+    response: str
 
 
 def detect_org_fast(message: str) -> str:
-    """Fast local org detection via signal words. No LLM call needed."""
     lower = message.lower()
-
     om_score = sum(1 for word in OM_SIGNALS if word in lower)
     ado_score = sum(1 for word in ADO_SIGNALS if word in lower)
     do_score = sum(1 for word in DO_SIGNALS if word in lower)
-
     if om_score > 0 and om_score >= ado_score and om_score >= do_score:
         return "om"
     if ado_score > 0 and ado_score >= om_score and ado_score >= do_score:
@@ -79,8 +69,9 @@ def detect_org_fast(message: str) -> str:
     return ""
 
 
-async def route_message(state: MasterState) -> MasterState:
-    org = detect_org_fast(state.message)
+async def route_message(state: MasterState) -> dict:
+    msg = state["message"]
+    org = detect_org_fast(msg)
 
     if not org:
         router_llm = get_llm(role="router", max_tokens=50)
@@ -93,100 +84,74 @@ async def route_message(state: MasterState) -> MasterState:
                 "master = general/unclear. "
                 "Reply with ONLY the category name, nothing else."
             )),
-            HumanMessage(content=state.message),
+            HumanMessage(content=msg),
         ])
         org = classification.content.strip().lower()
         if org not in {"om", "ado", "do", "master"}:
             org = "master"
 
-    state.detected_org = org
-    logger.info("Routing: '%s' → %s", state.message[:50], org)
-    return state
+    logger.info("Routing: '%s' → %s", msg[:50], org)
+    return {"detected_org": org}
 
 
-async def handle_om(state: MasterState) -> MasterState:
+async def _call_llm(state: MasterState, extra_system: str = "") -> dict:
     llm = get_llm(role="default")
+    system = MASTER_SOUL + ("\n\n" + extra_system if extra_system else "")
     response = await llm.ainvoke([
-        SystemMessage(content=(
-            MASTER_SOUL + "\n\n"
-            "Du bist jetzt im OM-Ops Modus (ObladenMedia).\n"
-            "Beantworte Fragen zu Kunden, Pipeline, Projekten, Team.\n"
-            "Wenn du echte Daten brauchst (Zoho, Gmail), sage dass die "
-            "n8n-Integration noch eingerichtet wird."
-        )),
-        HumanMessage(content=state.message),
+        SystemMessage(content=system),
+        HumanMessage(content=state["message"]),
     ])
-    state.response = response.content
-    return state
+    return {"response": response.content}
 
 
-async def handle_ado(state: MasterState) -> MasterState:
-    llm = get_llm(role="default")
-    response = await llm.ainvoke([
-        SystemMessage(content=(
-            MASTER_SOUL + "\n\n"
-            "Du bist jetzt im ADO-Ops Modus (Akademie Dr. Obladen).\n"
-            "Beantworte Fragen zu Seminaren, Teilnehmern, Buchungen.\n"
-            "Wenn du echte Daten brauchst (Zoho, Outlook), sage dass die "
-            "n8n-Integration noch eingerichtet wird."
-        )),
-        HumanMessage(content=state.message),
-    ])
-    state.response = response.content
-    return state
+async def handle_om(state: MasterState) -> dict:
+    return await _call_llm(state,
+        "Du bist jetzt im OM-Ops Modus (ObladenMedia).\n"
+        "Beantworte Fragen zu Kunden, Pipeline, Projekten, Team.\n"
+        "Wenn du echte Daten brauchst (Zoho, Gmail), sage dass die "
+        "n8n-Integration noch eingerichtet wird.")
 
 
-async def handle_do(state: MasterState) -> MasterState:
-    llm = get_llm(role="default")
-    response = await llm.ainvoke([
-        SystemMessage(content=(
-            MASTER_SOUL + "\n\n"
-            "Du bist jetzt im DO-Personal Modus (David Obladen / DOJO).\n"
-            "Beantworte Fragen zu Terminen, Erinnerungen, persoenlichen Themen.\n"
-            "Wenn du Kalenderdaten brauchst, sage dass die Calendar-Integration "
-            "noch eingerichtet wird."
-        )),
-        HumanMessage(content=state.message),
-    ])
-    state.response = response.content
-    return state
+async def handle_ado(state: MasterState) -> dict:
+    return await _call_llm(state,
+        "Du bist jetzt im ADO-Ops Modus (Akademie Dr. Obladen).\n"
+        "Beantworte Fragen zu Seminaren, Teilnehmern, Buchungen.\n"
+        "Wenn du echte Daten brauchst (Zoho, Outlook), sage dass die "
+        "n8n-Integration noch eingerichtet wird.")
 
 
-async def handle_master(state: MasterState) -> MasterState:
-    llm = get_llm(role="default")
-    response = await llm.ainvoke([
-        SystemMessage(content=MASTER_SOUL),
-        HumanMessage(content=state.message),
-    ])
-    state.response = response.content
-    return state
+async def handle_do(state: MasterState) -> dict:
+    return await _call_llm(state,
+        "Du bist jetzt im DO-Personal Modus (David Obladen / DOJO).\n"
+        "Beantworte Fragen zu Terminen, Erinnerungen, persoenlichen Themen.\n"
+        "Wenn du Kalenderdaten brauchst, sage dass die Calendar-Integration "
+        "noch eingerichtet wird.")
+
+
+async def handle_master(state: MasterState) -> dict:
+    return await _call_llm(state)
 
 
 def route_to_org(state: MasterState) -> Literal["om", "ado", "do", "master"]:
-    return state.detected_org if state.detected_org in {"om", "ado", "do"} else "master"
+    org = state.get("detected_org", "master")
+    return org if org in {"om", "ado", "do"} else "master"
 
 
 def build_master_graph() -> StateGraph:
     graph = StateGraph(MasterState)
-
     graph.add_node("route", route_message)
     graph.add_node("om", handle_om)
     graph.add_node("ado", handle_ado)
     graph.add_node("do", handle_do)
     graph.add_node("master", handle_master)
-
     graph.set_entry_point("route")
     graph.add_conditional_edges("route", route_to_org, {
-        "om": "om",
-        "ado": "ado",
-        "do": "do",
-        "master": "master",
+        "om": "om", "ado": "ado", "do": "do", "master": "master",
     })
     graph.add_edge("om", END)
     graph.add_edge("ado", END)
     graph.add_edge("do", END)
     graph.add_edge("master", END)
-
     return graph
 
 
@@ -194,10 +159,9 @@ _master_graph = build_master_graph().compile()
 
 
 async def process_message(message: str, user_id: str, chat_id: str) -> str:
-    initial_state = MasterState(
-        message=message,
-        user_id=user_id,
-        chat_id=chat_id,
-    )
-    result = await _master_graph.ainvoke(initial_state)
-    return result.response
+    result = await _master_graph.ainvoke({
+        "message": message,
+        "user_id": user_id,
+        "chat_id": chat_id,
+    })
+    return result.get("response", "Keine Antwort generiert.")
