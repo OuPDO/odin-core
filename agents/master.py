@@ -1,5 +1,6 @@
 """ODIN Master — Central Router and Orchestrator."""
 
+import asyncio
 import logging
 from typing import Literal, TypedDict
 
@@ -7,6 +8,8 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, END
 
 from config.llm import get_llm
+from agents.router import classify_intent
+from knowledge.search import knowledge_search
 
 logger = logging.getLogger("odin.agents.master")
 
@@ -52,6 +55,7 @@ class MasterState(TypedDict, total=False):
     user_id: str
     chat_id: str
     detected_org: str
+    knowledge_org: str | None
     response: str
 
 
@@ -71,8 +75,17 @@ def detect_org_fast(message: str) -> str:
 
 async def route_message(state: MasterState) -> dict:
     msg = state["message"]
-    org = detect_org_fast(msg)
+    org_hint = detect_org_fast(msg)
 
+    intent = await asyncio.to_thread(classify_intent, msg)
+    if intent == "knowledge":
+        logger.info("Routing: '%s' → knowledge (org_hint=%s)", msg[:50], org_hint)
+        return {
+            "detected_org": "knowledge",
+            "knowledge_org": org_hint if org_hint else None,
+        }
+
+    org = org_hint
     if not org:
         router_llm = get_llm(role="router", max_tokens=50)
         classification = await router_llm.ainvoke([
@@ -132,9 +145,15 @@ async def handle_master(state: MasterState) -> dict:
     return await _call_llm(state)
 
 
-def route_to_org(state: MasterState) -> Literal["om", "ado", "do", "master"]:
+async def handle_knowledge(state: MasterState) -> dict:
+    org = state.get("knowledge_org")
+    answer = await asyncio.to_thread(knowledge_search, state["message"], org)
+    return {"response": answer}
+
+
+def route_to_org(state: MasterState) -> Literal["om", "ado", "do", "master", "knowledge"]:
     org = state.get("detected_org", "master")
-    return org if org in {"om", "ado", "do"} else "master"
+    return org if org in {"om", "ado", "do", "knowledge"} else "master"
 
 
 def build_master_graph() -> StateGraph:
@@ -144,14 +163,16 @@ def build_master_graph() -> StateGraph:
     graph.add_node("ado", handle_ado)
     graph.add_node("do", handle_do)
     graph.add_node("master", handle_master)
+    graph.add_node("knowledge", handle_knowledge)
     graph.set_entry_point("route")
     graph.add_conditional_edges("route", route_to_org, {
-        "om": "om", "ado": "ado", "do": "do", "master": "master",
+        "om": "om", "ado": "ado", "do": "do", "master": "master", "knowledge": "knowledge",
     })
     graph.add_edge("om", END)
     graph.add_edge("ado", END)
     graph.add_edge("do", END)
     graph.add_edge("master", END)
+    graph.add_edge("knowledge", END)
     return graph
 
 

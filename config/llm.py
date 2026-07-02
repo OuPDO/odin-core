@@ -85,3 +85,15 @@ def get_llm(role: str = "default", max_tokens: int = 1024) -> BaseChatModel:
 
     logger.debug("LLM erstellt: provider=%s, model=%s, role=%s", provider, model, role)
     return factory(model, max_tokens)
+
+
+def get_azure_chat() -> BaseChatModel:
+    """gpt-5-mini via Azure (EU). Kein temperature/max_tokens forcieren (GPT-5-Gotcha)."""
+    from langchain_openai import AzureChatOpenAI
+
+    return AzureChatOpenAI(
+        azure_deployment=settings.azure_chat_deployment,
+        azure_endpoint=settings.azure_openai_endpoint,
+        api_key=settings.azure_openai_api_key,
+        api_version=settings.azure_chat_api_version,
+    )

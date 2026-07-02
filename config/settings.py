@@ -25,6 +25,19 @@ class Settings(BaseSettings):
     qdrant_url: str = ""
     qdrant_api_key: str = ""
 
+    # Azure OpenAI (EU / Sweden Central)
+    azure_openai_endpoint: str = ""
+    azure_openai_api_key: str = ""
+    azure_embedding_deployment: str = "text-embedding-3-small"
+    azure_embedding_model: str = "text-embedding-3-small"
+    azure_embedding_api_version: str = "2024-02-01"
+    azure_embedding_dim: int = 1536
+    azure_chat_deployment: str = "gpt-5-mini"
+    azure_chat_model: str = "gpt-5-mini"
+    azure_chat_api_version: str = "2024-12-01-preview"
+    azure_transcribe_deployment: str = "whisper"
+    azure_transcribe_api_version: str = "2024-06-01"
+
     # n8n
     n8n_om_url: str = ""
     n8n_om_api_key: str = ""
