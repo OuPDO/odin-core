@@ -47,6 +47,12 @@ class Settings(BaseSettings):
     # ODIN
     odin_environment: str = "production"
     odin_log_level: str = "INFO"
+    # Telegram-Bot im odin-core-Prozess. Standard aus, weil Hermes den
+    # @do_odin_bot-Token via Webhook besitzt (D-022) -> kein Polling-Konflikt.
+    odin_telegram_enabled: bool = False
+
+    # Remote-HTTP-MCP (SP-4.4). Leer = Endpoint fail-closed (401 fuer alle).
+    odin_mcp_api_key: str = ""
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

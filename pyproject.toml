@@ -23,6 +23,7 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
+    "mcp>=1.2.0",
 ]
 
 [project.optional-dependencies]
@@ -33,4 +34,4 @@ dev = [
 ]
 
 [tool.setuptools]
-packages = ["agents", "config", "knowledge", "memory", "scripts", "telegram_bot", "tools"]
+packages = ["agents", "config", "knowledge", "memory", "odin_mcp", "scripts", "telegram_bot", "tools"]
