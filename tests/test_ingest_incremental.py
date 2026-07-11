@@ -27,7 +27,7 @@ def _run(tmp_path, existing, files):
          patch.object(ing, "existing_hashes", return_value=existing), \
          patch.object(ing, "delete_by_source_path",
                       side_effect=lambda c, o, sp: calls["deleted"].append(sp)):
-        total = ing.ingest_embeddings([row])
+        total = ing.ingest_embeddings([row]).embedded
     return total, calls, emb
 
 

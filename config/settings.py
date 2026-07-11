@@ -37,6 +37,14 @@ class Settings(BaseSettings):
     azure_chat_api_version: str = "2024-12-01-preview"
     azure_transcribe_deployment: str = "whisper"
     azure_transcribe_api_version: str = "2024-06-01"
+    # Embedding-Retry (429-Fix). Azure S0-Tier drosselt grosse Bursts per HTTP
+    # 429 mit "retry after 60s". Der alte 1/2/4s-Backoff gab vor dem Reset auf
+    # -> Reindex embeddete 0 und der Backlog drainierte nie. Geduldige Retries
+    # (Backoff bis 120s) sind selbst der Throttle: sie spacen die Requests aus
+    # und verhindern so den Storm. Kein Per-Run-Cap noetig.
+    embed_client_max_retries: int = 6       # Azure-SDK-Retries (respektiert Retry-After-Header)
+    embed_max_attempts: int = 5             # aeussere Retry-Schleife pro Batch
+    embed_retry_base_seconds: float = 15.0  # Backoff-Basis, cap 120s -- matcht Azure-60s-Fenster
 
     # n8n
     n8n_om_url: str = ""

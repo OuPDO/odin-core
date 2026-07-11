@@ -2,6 +2,7 @@ import argparse
 import hashlib
 import json
 import logging
+from dataclasses import dataclass
 import os
 import re
 import subprocess
@@ -28,6 +29,21 @@ from memory.registry import upsert_project
 from qdrant_client.models import PointStruct
 
 logger = logging.getLogger("odin.ingest")
+
+
+@dataclass(frozen=True)
+class IngestResult:
+    """Ergebnis eines Ingest-Laufs -- traegt das Observability-Signal.
+
+    embedded: neu eingebettete Chunks.
+    skipped_unchanged: per content_hash uebersprungen (kein Azure-Call).
+    errors: Quellen, die trotz aller Retries fehlschlugen (typisch: 429).
+    """
+
+    embedded: int
+    skipped_unchanged: int
+    errors: int
+
 
 SKIP_DIRS = {"node_modules", ".git", ".venv", "venv", "dist", ".next", "__pycache__"}
 
@@ -80,20 +96,29 @@ def collect_sources(project_path: str) -> list[tuple[str, str]]:
     return srcs
 
 
-def _embed_with_retry(emb, chunks: list[str], max_attempts: int = 3) -> list:
-    """Embed with up to max_attempts retries on failure (exponential backoff)."""
+def _embed_with_retry(emb, chunks: list[str]) -> list:
+    """Embed mit geduldigen Retries. Backoff (15/30/60/120s, cap 120) matcht das
+    Azure-429-Fenster (60s) -- die alten 1/2/4s gaben vor dem Ratelimit-Reset auf.
+    """
     last_exc: Exception | None = None
-    for attempt in range(max_attempts):
+    attempts = settings.embed_max_attempts
+    for attempt in range(attempts):
         try:
             return emb.embed_documents(chunks)
         except Exception as exc:
             last_exc = exc
-            logger.warning("embed_documents attempt %d failed: %s", attempt + 1, exc)
-            time.sleep(2 ** attempt)
+            if attempt == attempts - 1:
+                logger.warning("embed_documents attempt %d/%d failed: %s -- giving up",
+                               attempt + 1, attempts, exc)
+                break  # kein Sleep nach dem letzten Versuch
+            wait = min(settings.embed_retry_base_seconds * (2 ** attempt), 120.0)
+            logger.warning("embed_documents attempt %d/%d failed: %s -- sleeping %.0fs",
+                           attempt + 1, attempts, exc, wait)
+            time.sleep(wait)
     raise last_exc  # type: ignore[misc]
 
 
-def ingest_embeddings(rows: list[dict]) -> int:
+def ingest_embeddings(rows: list[dict]) -> IngestResult:
     """Inkrementeller Ingest: nur geaenderte/neue Dateien werden embedded (SP-3.1).
 
     Pro Repo werden die bereits indexierten content_hashes aus Qdrant gelesen und
@@ -101,13 +126,18 @@ def ingest_embeddings(rows: list[dict]) -> int:
     uebersprungen (kein Azure-Call), geaenderte erst geloescht und neu embedded,
     on-disk verschwundene Dateien (Orphans) geloescht.
 
-    Returns: Anzahl neu eingebetteter Chunks.
+    Eine Datei wird atomar embedded (alle Chunks oder keiner) -- der content_hash
+    wird erst nach erfolgreichem Upsert gesetzt. Scheitert das Embedden trotz aller
+    Retries (typisch: anhaltendes 429), behaelt die Datei keinen Hash und wird im
+    naechsten Lauf erneut versucht.
+
+    Returns: IngestResult (embedded/skipped/errors).
     """
     emb = get_embeddings()
     client = get_client()
     for org in COLLECTIONS:
         ensure_collection(client, org, settings.azure_embedding_dim)
-    total = 0
+    total = skipped_total = errors_total = 0
     for r in rows:
         org = r["org"] if r["org"] in COLLECTIONS else "do"
         git_remote = r.get("git_remote")
@@ -125,7 +155,7 @@ def ingest_embeddings(rows: list[dict]) -> int:
             existing = {}
 
         seen: set[str] = set()
-        embedded = skipped = deleted = 0
+        embedded = skipped = deleted = errors = 0
 
         for stype, fp in collect_sources(fs):
             rel = os.path.relpath(fp, fs)
@@ -167,21 +197,31 @@ def ingest_embeddings(rows: list[dict]) -> int:
                 total += len(points)
                 embedded += len(points)
             except Exception as exc:
+                # Nach allen Retries gescheitert (typisch: anhaltendes 429). Quelle
+                # bleibt ohne Hash -> naechster Lauf versucht sie erneut.
                 logger.warning("Skipping source %s: %s", fp, exc)
+                errors += 1
                 continue
 
-        # Orphans: waren indexiert, aber nicht mehr on-disk -> loeschen.
+        # Orphans: waren indexiert, aber nicht mehr on-disk -> loeschen. Ein
+        # fehlgeschlagenes Delete zaehlt als error, damit der Heartbeat rot wird
+        # und der Orphan nicht still in Qdrant zurueckbleibt.
         for logical in set(existing.keys()) - seen:
             try:
                 delete_by_source_path(client, org, logical)
                 deleted += 1
             except Exception as exc:
                 logger.warning("orphan delete failed for %s: %s", logical, exc)
+                errors += 1
 
+        skipped_total += skipped
+        errors_total += errors
         if git_remote:
-            logger.info("repo %s: embedded=%d skipped=%d deleted=%d",
-                        git_remote, embedded, skipped, deleted)
-    return total
+            logger.info("repo %s: embedded=%d skipped=%d deleted=%d errors=%d",
+                        git_remote, embedded, skipped, deleted, errors)
+
+    return IngestResult(embedded=total, skipped_unchanged=skipped_total,
+                        errors=errors_total)
 
 
 def _stack(path: str) -> str | None:
@@ -303,8 +343,9 @@ def main() -> None:
         upsert_project(r)
     print(f"upserted {len(rows)} projects")
     if not args.registry_only:
-        n = ingest_embeddings(rows)
-        print(f"embedded {n} chunks")
+        res = ingest_embeddings(rows)
+        print(f"embedded {res.embedded} chunks "
+              f"(skipped={res.skipped_unchanged} errors={res.errors})")
 
 if __name__ == "__main__":
     main()

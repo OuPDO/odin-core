@@ -1,0 +1,138 @@
+"""Tests fuer den 429-Fix: geduldiger Retry surfaced als errors (kein Crash) und
+der Kuma-Heartbeat, der das stille Versagen faengt. Qdrant + Embeddings gemockt."""
+from unittest.mock import MagicMock, patch
+
+import scripts.ingest as ing
+import scripts.reindex_repos as rr
+
+
+def _mk(tmp_path, existing, files, embed_raises=False):
+    """Ingestiert tmp_path und gibt (result, calls) zurueck."""
+    for name, content in files.items():
+        (tmp_path / name).write_text(content)
+    row = {"name": "x", "path": "OuPDO/x", "fs_path": str(tmp_path),
+           "git_remote": "OuPDO/x", "org": "do"}
+    emb = MagicMock()
+    if embed_raises:
+        emb.embed_documents.side_effect = RuntimeError("429 RateLimitReached")
+    else:
+        emb.embed_documents.side_effect = lambda chunks: [[0.0] * 1536 for _ in chunks]
+    client = MagicMock()
+    calls = {"deleted": [], "upserted": []}
+    client.upsert.side_effect = lambda **k: calls["upserted"].append(
+        k["points"][0].payload["source_path"])
+    with patch.object(ing, "get_embeddings", return_value=emb), \
+         patch.object(ing, "get_client", return_value=client), \
+         patch.object(ing, "ensure_collection"), \
+         patch.object(ing, "existing_hashes", return_value=existing), \
+         patch.object(ing, "time") as mock_time, \
+         patch.object(ing, "delete_by_source_path",
+                      side_effect=lambda c, o, sp: calls["deleted"].append(sp)):
+        mock_time.sleep = MagicMock()  # keine echten Backoff-Waits im Test
+        result = ing.ingest_embeddings([row])
+    return result, calls, emb
+
+
+def test_embed_failure_counts_as_error_not_crash(tmp_path):
+    """Anhaltendes 429 -> Quelle wird uebersprungen und als error gezaehlt,
+    kein Crash, embedded=0, Datei behaelt keinen Hash (kein Upsert)."""
+    res, calls, emb = _mk(tmp_path, existing={}, files={"A.md": "content a"},
+                          embed_raises=True)
+    assert res.embedded == 0
+    assert res.errors == 1
+    assert calls["upserted"] == []
+
+
+def test_embed_failure_retries_before_giving_up(tmp_path):
+    """_embed_with_retry versucht settings.embed_max_attempts mal, bevor es die
+    Quelle als error zaehlt."""
+    from config.settings import settings
+    res, calls, emb = _mk(tmp_path, existing={}, files={"A.md": "content a"},
+                          embed_raises=True)
+    assert emb.embed_documents.call_count == settings.embed_max_attempts
+
+
+def test_orphan_still_deleted(tmp_path):
+    """Ohne Budget-Logik wird ein Orphan (indexiert, nicht mehr on-disk) geloescht."""
+    res, calls, emb = _mk(
+        tmp_path,
+        existing={"OuPDO/x/GHOST.md": "h"},
+        files={"A.md": "content a"},
+    )
+    assert "OuPDO/x/GHOST.md" in calls["deleted"]
+
+
+def test_no_sleep_after_final_attempt(tmp_path):
+    """Retry-Loop schlaeft nur zwischen Versuchen, nicht nach dem letzten
+    (kein unnoetiger Backoff vor dem Aufgeben)."""
+    from config.settings import settings
+    (tmp_path / "A.md").write_text("content a")
+    row = {"name": "x", "path": "OuPDO/x", "fs_path": str(tmp_path),
+           "git_remote": "OuPDO/x", "org": "do"}
+    emb = MagicMock()
+    emb.embed_documents.side_effect = RuntimeError("429 RateLimitReached")
+    with patch.object(ing, "get_embeddings", return_value=emb), \
+         patch.object(ing, "get_client", return_value=MagicMock()), \
+         patch.object(ing, "ensure_collection"), \
+         patch.object(ing, "existing_hashes", return_value={}), \
+         patch.object(ing, "delete_by_source_path"), \
+         patch.object(ing, "time") as mt:
+        ing.ingest_embeddings([row])
+    assert emb.embed_documents.call_count == settings.embed_max_attempts
+    assert mt.sleep.call_count == settings.embed_max_attempts - 1
+
+
+def test_orphan_delete_failure_counts_as_error(tmp_path):
+    """Scheitert das Loeschen eines Orphans, wird es als error gezaehlt -> Heartbeat rot."""
+    (tmp_path / "A.md").write_text("content a")
+    row = {"name": "x", "path": "OuPDO/x", "fs_path": str(tmp_path),
+           "git_remote": "OuPDO/x", "org": "do"}
+    emb = MagicMock()
+    emb.embed_documents.side_effect = lambda chunks: [[0.0] * 1536 for _ in chunks]
+    with patch.object(ing, "get_embeddings", return_value=emb), \
+         patch.object(ing, "get_client", return_value=MagicMock()), \
+         patch.object(ing, "ensure_collection"), \
+         patch.object(ing, "existing_hashes", return_value={"OuPDO/x/GHOST.md": "h"}), \
+         patch.object(ing, "time"), \
+         patch.object(ing, "delete_by_source_path", side_effect=RuntimeError("qdrant down")):
+        res = ing.ingest_embeddings([row])
+    assert res.errors >= 1
+
+
+def _capture_heartbeat(monkeypatch, result):
+    seen = {}
+    monkeypatch.setenv("KUMA_REINDEX_PUSH_URL", "https://kuma.example/api/push/abc")
+
+    class _Resp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return b""
+
+    def _fake_urlopen(url, timeout=0):
+        seen["url"] = url
+        return _Resp()
+
+    monkeypatch.setattr(rr.urllib.request, "urlopen", _fake_urlopen)
+    rr._push_heartbeat(result)
+    return seen.get("url", "")
+
+
+def test_heartbeat_down_when_errors(monkeypatch):
+    url = _capture_heartbeat(monkeypatch, {
+        "chunks": 0, "skipped": 5, "errors": 3, "repos_failed": 0})
+    assert "status=down" in url
+
+
+def test_heartbeat_up_when_clean(monkeypatch):
+    url = _capture_heartbeat(monkeypatch, {
+        "chunks": 42, "skipped": 5, "errors": 0, "repos_failed": 0})
+    assert "status=up" in url
+
+
+def test_heartbeat_noop_without_url(monkeypatch):
+    monkeypatch.delenv("KUMA_REINDEX_PUSH_URL", raising=False)
+    called = {"n": 0}
+    monkeypatch.setattr(rr.urllib.request, "urlopen",
+                        lambda *a, **k: called.__setitem__("n", called["n"] + 1))
+    rr._push_heartbeat({"chunks": 0, "skipped": 0, "errors": 0, "repos_failed": 0})
+    assert called["n"] == 0

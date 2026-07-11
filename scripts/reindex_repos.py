@@ -10,6 +10,8 @@ import logging
 import os
 import subprocess
 import sys
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 
 # Macht den odin-core-Root importierbar, wenn das Skript direkt ausgefuehrt wird.
@@ -72,7 +74,7 @@ def reindex(cache_dir: str) -> dict:
         dict mit repos_ok, repos_failed, chunks
     """
     token = os.environ.get("GITHUB_TOKEN")
-    ok = failed = chunks = 0
+    ok = failed = chunks = skipped = errors = 0
 
     for entry in get_indexed_repos():
         repo = entry["repo"]
@@ -91,15 +93,44 @@ def reindex(cache_dir: str) -> dict:
                 "last_scanned_at": datetime.now(timezone.utc).isoformat(),
             }
             upsert_project(row)
-            chunks += ingest_embeddings([row])
+            res = ingest_embeddings([row])
+            chunks += res.embedded
+            skipped += res.skipped_unchanged
+            errors += res.errors
             ok += 1
         except Exception as exc:
             logger.warning("repo %s failed: %s", repo, exc)
             failed += 1
             continue
 
-    logger.info("reindex done: repos_ok=%s repos_failed=%s chunks=%s", ok, failed, chunks)
-    return {"repos_ok": ok, "repos_failed": failed, "chunks": chunks}
+    result = {"repos_ok": ok, "repos_failed": failed, "chunks": chunks,
+              "skipped": skipped, "errors": errors}
+    logger.info("reindex done: %s", result)
+    return result
+
+
+def _push_heartbeat(result: dict) -> None:
+    """Meldet den Lauf an einen Uptime-Kuma-Push-Monitor (D-026-Muster).
+
+    KUMA_REINDEX_PUSH_URL leer -> No-op. Degradiert (status=down, Kuma alarmiert)
+    wenn Embeddings trotz Retries scheiterten (errors>0, typisch anhaltendes 429)
+    oder ein Repo fehlschlug. Faengt das stille Versagen, bei dem der Job gruen
+    endet aber 0 Chunks embeddet.
+    """
+    url = os.environ.get("KUMA_REINDEX_PUSH_URL")
+    if not url:
+        return
+    degraded = result["errors"] > 0 or result["repos_failed"] > 0
+    status = "down" if degraded else "up"
+    msg = (f"embedded={result['chunks']} skipped={result['skipped']} "
+           f"errors={result['errors']} repos_failed={result['repos_failed']}")
+    query = urllib.parse.urlencode({"status": status, "msg": msg, "ping": ""})
+    try:
+        with urllib.request.urlopen(f"{url}?{query}", timeout=15) as resp:
+            resp.read()
+        logger.info("heartbeat pushed: status=%s %s", status, msg)
+    except Exception as exc:
+        logger.warning("heartbeat push failed: %s", exc)
 
 
 def main() -> None:
@@ -108,6 +139,7 @@ def main() -> None:
     os.makedirs(cache, exist_ok=True)
     result = reindex(cache)
     logger.info("reindex summary: %s", result)
+    _push_heartbeat(result)
     if result["repos_failed"]:
         sys.exit(1)
 

@@ -6,6 +6,9 @@ from unittest.mock import patch
 import pytest
 
 import scripts.reindex_repos as rr
+from scripts.ingest import IngestResult
+
+_ING3 = IngestResult(embedded=3, skipped_unchanged=0, errors=0)
 
 
 def test_reindex_builds_config_identity_and_upserts(tmp_path):
@@ -20,11 +23,12 @@ def test_reindex_builds_config_identity_and_upserts(tmp_path):
          patch.object(rr, "_stack", return_value=None), \
          patch.object(rr, "_purpose", return_value=None), \
          patch.object(rr, "upsert_project") as mock_upsert, \
-         patch.object(rr, "ingest_embeddings", return_value=3) as mock_ingest:
+         patch.object(rr, "ingest_embeddings", return_value=_ING3) as mock_ingest:
         result = rr.reindex(str(tmp_path))
 
     assert result["repos_ok"] == 2
     assert result["repos_failed"] == 0
+    assert result["chunks"] == 6  # 2 repos x 3 embedded
 
     for i, entry in enumerate(repos):
         row = mock_upsert.call_args_list[i].args[0]
@@ -47,7 +51,7 @@ def test_reindex_skips_failed_repo(tmp_path):
          patch.object(rr, "_stack", return_value=None), \
          patch.object(rr, "_purpose", return_value=None), \
          patch.object(rr, "upsert_project"), \
-         patch.object(rr, "ingest_embeddings", return_value=3):
+         patch.object(rr, "ingest_embeddings", return_value=_ING3):
         result = rr.reindex(str(tmp_path))
 
     assert result["repos_ok"] == 1
