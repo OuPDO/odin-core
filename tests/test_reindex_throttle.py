@@ -140,6 +140,131 @@ def test_pace_disabled_when_interval_zero(monkeypatch):
     assert slept == []
 
 
+def _row(tmp_path):
+    return {"name": "x", "path": "OuPDO/x", "fs_path": str(tmp_path),
+            "git_remote": "OuPDO/x", "org": "do"}
+
+
+def test_upsert_splits_into_batches(tmp_path, monkeypatch):
+    """Grosse Datei -> Points werden in Upsert-Batches <= upsert_batch_size
+    geschrieben, nicht als EIN Riesen-PUT (der das Proxy-Body-Limit reisst -> 502)."""
+    monkeypatch.setattr(ing.settings, "upsert_batch_size", 5)
+    monkeypatch.setattr(ing.settings, "embed_min_interval_seconds", 0.0)
+    (tmp_path / "A.md").write_text("x" * (800 * 12))  # >= 12 Chunks
+    sizes: list[int] = []
+    emb = MagicMock()
+    emb.embed_documents.side_effect = lambda c: [[0.0] * 1536 for _ in c]
+    client = MagicMock()
+    client.upsert.side_effect = lambda **k: sizes.append(len(k["points"]))
+    with patch.object(ing, "get_embeddings", return_value=emb), \
+         patch.object(ing, "get_client", return_value=client), \
+         patch.object(ing, "ensure_collection"), \
+         patch.object(ing, "existing_hashes", return_value={}), \
+         patch.object(ing, "time"), \
+         patch.object(ing, "delete_by_source_path"):
+        res = ing.ingest_embeddings([_row(tmp_path)])
+    assert len(sizes) >= 3                 # 12 Points / 5 -> >= 3 Batches
+    assert all(s <= 5 for s in sizes)      # kein Batch groesser als die Grenze
+    assert res.errors == 0
+
+
+def test_upsert_failure_rolls_back_and_counts_error(tmp_path, monkeypatch):
+    """Scheitert ein Upsert-Batch endgueltig -> Rollback (delete_by_source_path der
+    Quelle) + error, kein inkonsistenter Teilstand mit content_hash."""
+    monkeypatch.setattr(ing.settings, "upsert_batch_size", 5)
+    monkeypatch.setattr(ing.settings, "upsert_max_attempts", 2)
+    monkeypatch.setattr(ing.settings, "embed_min_interval_seconds", 0.0)
+    (tmp_path / "A.md").write_text("x" * (800 * 12))
+    emb = MagicMock()
+    emb.embed_documents.side_effect = lambda c: [[0.0] * 1536 for _ in c]
+    client = MagicMock()
+    n = {"i": 0}
+
+    def _upsert(**k):
+        n["i"] += 1
+        if n["i"] >= 2:                    # ab dem zweiten Batch dauerhaft 502
+            raise RuntimeError("Unexpected Response: 502 (Bad Gateway)")
+
+    client.upsert.side_effect = _upsert
+    deleted: list[str] = []
+    with patch.object(ing, "get_embeddings", return_value=emb), \
+         patch.object(ing, "get_client", return_value=client), \
+         patch.object(ing, "ensure_collection"), \
+         patch.object(ing, "existing_hashes", return_value={}), \
+         patch.object(ing, "time"), \
+         patch.object(ing, "delete_by_source_path",
+                      side_effect=lambda c, o, sp: deleted.append(sp)):
+        res = ing.ingest_embeddings([_row(tmp_path)])
+    assert res.errors == 1
+    assert res.embedded == 0
+    assert "OuPDO/x/A.md" in deleted       # Rollback ausgefuehrt
+
+
+def test_rollback_delete_retries(tmp_path, monkeypatch):
+    """Scheitert der Rollback-Delete transient, wird er wiederholt -- sonst blieben
+    Teil-Points MIT content_hash liegen und die Quelle waere permanent geskippt."""
+    monkeypatch.setattr(ing.settings, "upsert_batch_size", 5)
+    monkeypatch.setattr(ing.settings, "upsert_max_attempts", 3)
+    monkeypatch.setattr(ing.settings, "embed_min_interval_seconds", 0.0)
+    (tmp_path / "A.md").write_text("x" * (800 * 12))
+    emb = MagicMock()
+    emb.embed_documents.side_effect = lambda c: [[0.0] * 1536 for _ in c]
+    client = MagicMock()
+    up = {"i": 0}
+
+    def _upsert(**k):
+        up["i"] += 1
+        if up["i"] >= 2:                    # zweiter Batch scheitert -> Rollback
+            raise RuntimeError("502")
+
+    client.upsert.side_effect = _upsert
+    dele = {"i": 0}
+
+    def _del(c, o, sp):
+        dele["i"] += 1
+        if dele["i"] == 1:                  # erster Rollback-Delete scheitert transient
+            raise RuntimeError("qdrant blip")
+
+    with patch.object(ing, "get_embeddings", return_value=emb), \
+         patch.object(ing, "get_client", return_value=client), \
+         patch.object(ing, "ensure_collection"), \
+         patch.object(ing, "existing_hashes", return_value={}), \
+         patch.object(ing, "time"), \
+         patch.object(ing, "delete_by_source_path", side_effect=_del):
+        res = ing.ingest_embeddings([_row(tmp_path)])
+    assert res.errors == 1
+    assert dele["i"] >= 2                   # Rollback-Delete wurde wiederholt
+
+
+def test_upsert_retries_transient_then_succeeds(tmp_path, monkeypatch):
+    """Transientes Qdrant-5xx auf einem Batch -> kurzer Retry, dann Erfolg,
+    kein error."""
+    monkeypatch.setattr(ing.settings, "upsert_max_attempts", 3)
+    monkeypatch.setattr(ing.settings, "embed_min_interval_seconds", 0.0)
+    (tmp_path / "A.md").write_text("content a")
+    emb = MagicMock()
+    emb.embed_documents.side_effect = lambda c: [[0.0] * 1536 for _ in c]
+    client = MagicMock()
+    n = {"i": 0}
+
+    def _upsert(**k):
+        n["i"] += 1
+        if n["i"] == 1:
+            raise RuntimeError("502 transient")
+
+    client.upsert.side_effect = _upsert
+    with patch.object(ing, "get_embeddings", return_value=emb), \
+         patch.object(ing, "get_client", return_value=client), \
+         patch.object(ing, "ensure_collection"), \
+         patch.object(ing, "existing_hashes", return_value={}), \
+         patch.object(ing, "time"), \
+         patch.object(ing, "delete_by_source_path"):
+        res = ing.ingest_embeddings([_row(tmp_path)])
+    assert res.errors == 0
+    assert res.embedded >= 1
+    assert n["i"] == 2                      # 1 Fehlschlag + 1 Erfolg
+
+
 def _capture_heartbeat(monkeypatch, result):
     seen = {}
     monkeypatch.setenv("KUMA_REINDEX_PUSH_URL", "https://kuma.example/api/push/abc")

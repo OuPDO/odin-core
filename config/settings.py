@@ -54,6 +54,16 @@ class Settings(BaseSettings):
     # RPM-Limit. 0 = Drossel aus (Backoff bleibt).
     embed_batch_size: int = 16              # Chunks pro Embed-Request (Sub-Batch)
     embed_min_interval_seconds: float = 3.0  # Mindestabstand zwischen zwei Requests
+    # Qdrant-Upsert-Batching. Nachdem die Embed-Drossel den 429 beseitigt hatte,
+    # trat der naechste monolithische Request zutage: eine 2.4-MB-Datei (~3400
+    # Chunks) ging als EIN Upsert-PUT raus -> Payload sprengte die Body-Grenze des
+    # Proxy vor Qdrant -> 502. Points werden daher in Batches geschrieben; bei
+    # Teilfehler rollt die Quelle zurueck (kein inkonsistenter content_hash).
+    # 16 Points x 1536-dim-Float-Vektor (REST/JSON) ~= 0.4 MB/PUT -- sicher unter
+    # der ueblichen 1-MB-Proxy-Body-Grenze (64 waeren ~1.5-2 MB und koennten den
+    # 502 reproduzieren). Env-ueberschreibbar, falls das echte Limit hoeher liegt.
+    upsert_batch_size: int = 16             # Points pro Qdrant-Upsert-PUT
+    upsert_max_attempts: int = 3            # Retry fuer transiente Qdrant-5xx + Rollback
 
     # n8n
     n8n_om_url: str = ""

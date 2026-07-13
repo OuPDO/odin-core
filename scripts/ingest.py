@@ -154,6 +154,65 @@ def _embed_with_retry(emb, chunks: list[str]) -> list:
     raise last_exc  # type: ignore[misc]
 
 
+def _upsert_with_retry(client, collection: str, points: list) -> None:
+    """Ein Upsert-Batch mit kurzem Retry fuer transiente Qdrant-5xx (self-hosted,
+    schnell -> kurzer Backoff 1/2s, nicht das 60s-Azure-Fenster)."""
+    attempts = max(1, settings.upsert_max_attempts)
+    last_exc: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            client.upsert(collection_name=collection, points=points)
+            return
+        except Exception as exc:
+            last_exc = exc
+            if attempt == attempts - 1:
+                break
+            time.sleep(2 ** attempt)
+    raise last_exc  # type: ignore[misc]
+
+
+def _rollback_delete(client, org: str, logical: str) -> None:
+    """Loescht die (partiell) geschriebenen Points einer Quelle nach einem
+    gescheiterten Batch-Upsert -- MIT Retry. Kritisch, weil jeder Point bereits den
+    content_hash der ganzen Datei traegt: bleibt der Rollback aus, sieht
+    existing_hashes im naechsten Lauf den Hash auf den Teil-Points und ueberspringt
+    die Quelle fuer immer als "fertig". Scheitert auch der Rollback endgueltig ->
+    ERROR (Operator-Signal, Heartbeat ist ohnehin rot ueber den error-Count)."""
+    attempts = max(1, settings.upsert_max_attempts)
+    for attempt in range(attempts):
+        try:
+            delete_by_source_path(client, org, logical)
+            return
+        except Exception as exc:
+            if attempt == attempts - 1:
+                logger.error("ROLLBACK delete failed for %s after %d attempts: %s -- "
+                             "partial points may remain indexed with content_hash; "
+                             "manual reindex of this source may be needed",
+                             logical, attempts, exc)
+                return
+            time.sleep(2 ** attempt)
+
+
+def _upsert_batched(client, org: str, logical: str, points: list) -> None:
+    """Schreibt die Points EINER Quelle in Batches (upsert_batch_size), damit der
+    PUT-Payload unter der Body-Grenze des Proxy vor Qdrant bleibt (grosse Files ->
+    sonst 502). Scheitert ein Batch endgueltig, werden die bereits geschriebenen
+    Points der Quelle zurueckgerollt (mit Retry) und die Exception propagiert -> die
+    Datei faellt in den except-Zweig des Callers und behaelt keinen content_hash.
+    Sonst wuerde ein Teilstand die Quelle faelschlich als fertig markieren.
+    """
+    size = max(1, settings.upsert_batch_size)
+    written = False
+    try:
+        for i in range(0, len(points), size):
+            _upsert_with_retry(client, COLLECTIONS[org], points[i:i + size])
+            written = True
+    except Exception:
+        if written:
+            _rollback_delete(client, org, logical)
+        raise
+
+
 def ingest_embeddings(rows: list[dict]) -> IngestResult:
     """Inkrementeller Ingest: nur geaenderte/neue Dateien werden embedded (SP-3.1).
 
@@ -229,7 +288,7 @@ def ingest_embeddings(rows: list[dict]) -> IngestResult:
                     )
                     for i, (c, v) in enumerate(zip(chunks, vectors))
                 ]
-                client.upsert(collection_name=COLLECTIONS[org], points=points)
+                _upsert_batched(client, org, logical, points)
                 total += len(points)
                 embedded += len(points)
             except Exception as exc:
