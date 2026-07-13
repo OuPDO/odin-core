@@ -96,14 +96,50 @@ def collect_sources(project_path: str) -> list[tuple[str, str]]:
     return srcs
 
 
+# Pacer-State: monotonic-Timestamp des letzten Embed-Requests. Modul-global,
+# damit die Drossel ueber alle Files/Sub-Batches EINES Laeufs greift.
+_last_embed_at: list[float] = [0.0]
+
+
+def _pace() -> None:
+    """Proaktive Client-Drossel: haelt mind. embed_min_interval_seconds zwischen
+    zwei Embed-Requests ein, damit der Reindex das S0-RPM-Limit gar nicht erst
+    reisst (der Backoff greift nur reaktiv NACH einem 429). 0 = aus.
+    """
+    interval = settings.embed_min_interval_seconds
+    if interval <= 0:
+        return
+    now = time.monotonic()
+    wait = interval - (now - _last_embed_at[0])
+    if wait > 0:
+        time.sleep(wait)
+    _last_embed_at[0] = time.monotonic()
+
+
+def _embed_batched(emb, chunks: list[str]) -> list:
+    """Embed in Sub-Batches der Groesse embed_batch_size, jeder mit Pacing + Retry.
+    Kleine Batches halten die Tokens/Request unter dem S0-Per-Request-Limit; das
+    Pacing haelt die Requests/s unter dem RPM-Limit. Atomar auf File-Ebene:
+    scheitert ein Sub-Batch endgueltig, propagiert die Exception -> die ganze Datei
+    faellt in den except-Zweig des Callers (kein Teil-Upsert).
+    """
+    size = max(1, settings.embed_batch_size)
+    vectors: list = []
+    for i in range(0, len(chunks), size):
+        vectors.extend(_embed_with_retry(emb, chunks[i:i + size]))
+    return vectors
+
+
 def _embed_with_retry(emb, chunks: list[str]) -> list:
-    """Embed mit geduldigen Retries. Backoff (15/30/60/120s, cap 120) matcht das
-    Azure-429-Fenster (60s) -- die alten 1/2/4s gaben vor dem Ratelimit-Reset auf.
+    """Embed EINES Sub-Batches mit geduldigen Retries. Backoff (15/30/60/120s,
+    cap 120) matcht das Azure-429-Fenster (60s) -- die alten 1/2/4s gaben vor dem
+    Ratelimit-Reset auf. Vor jedem Versuch greift _pace() (proaktive Drossel).
     """
     last_exc: Exception | None = None
     attempts = settings.embed_max_attempts
     for attempt in range(attempts):
         try:
+            _pace()
             return emb.embed_documents(chunks)
         except Exception as exc:
             last_exc = exc
@@ -176,7 +212,7 @@ def ingest_embeddings(rows: list[dict]) -> IngestResult:
                     continue
                 if logical in existing:
                     delete_by_source_path(client, org, logical)  # geaendert -> alte Points weg
-                vectors = _embed_with_retry(emb, chunks)
+                vectors = _embed_batched(emb, chunks)
                 points = [
                     PointStruct(
                         id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"{logical}::{i}")),

@@ -45,6 +45,15 @@ class Settings(BaseSettings):
     embed_client_max_retries: int = 6       # Azure-SDK-Retries (respektiert Retry-After-Header)
     embed_max_attempts: int = 5             # aeussere Retry-Schleife pro Batch
     embed_retry_base_seconds: float = 15.0  # Backoff-Basis, cap 120s -- matcht Azure-60s-Fenster
+    # Proaktive Drossel (429-Fix, Teil 2). Der Backoff oben greift nur REAKTIV
+    # nach einem 429. Zwei Bursts reissen das S0-Limit trotzdem: (a) eine grosse
+    # Datei ging als EIN Riesen-Request raus (~226 Chunks/~45K Tokens -> Per-
+    # Request-TPM-Limit sofort gerissen, jeder Retry schickt denselben Brocken),
+    # (b) viele Files feuerten back-to-back (RPM-Burst). Kleine Sub-Batches halten
+    # die Tokens/Request klein, das Mindestintervall haelt die Requests/s unter dem
+    # RPM-Limit. 0 = Drossel aus (Backoff bleibt).
+    embed_batch_size: int = 16              # Chunks pro Embed-Request (Sub-Batch)
+    embed_min_interval_seconds: float = 3.0  # Mindestabstand zwischen zwei Requests
 
     # n8n
     n8n_om_url: str = ""

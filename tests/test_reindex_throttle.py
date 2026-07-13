@@ -26,6 +26,7 @@ def _mk(tmp_path, existing, files, embed_raises=False):
          patch.object(ing, "ensure_collection"), \
          patch.object(ing, "existing_hashes", return_value=existing), \
          patch.object(ing, "time") as mock_time, \
+         patch.object(ing.settings, "embed_min_interval_seconds", 0.0), \
          patch.object(ing, "delete_by_source_path",
                       side_effect=lambda c, o, sp: calls["deleted"].append(sp)):
         mock_time.sleep = MagicMock()  # keine echten Backoff-Waits im Test
@@ -76,6 +77,7 @@ def test_no_sleep_after_final_attempt(tmp_path):
          patch.object(ing, "ensure_collection"), \
          patch.object(ing, "existing_hashes", return_value={}), \
          patch.object(ing, "delete_by_source_path"), \
+         patch.object(ing.settings, "embed_min_interval_seconds", 0.0), \
          patch.object(ing, "time") as mt:
         ing.ingest_embeddings([row])
     assert emb.embed_documents.call_count == settings.embed_max_attempts
@@ -94,9 +96,48 @@ def test_orphan_delete_failure_counts_as_error(tmp_path):
          patch.object(ing, "ensure_collection"), \
          patch.object(ing, "existing_hashes", return_value={"OuPDO/x/GHOST.md": "h"}), \
          patch.object(ing, "time"), \
+         patch.object(ing.settings, "embed_min_interval_seconds", 0.0), \
          patch.object(ing, "delete_by_source_path", side_effect=RuntimeError("qdrant down")):
         res = ing.ingest_embeddings([row])
     assert res.errors >= 1
+
+
+def test_embed_splits_into_subbatches(tmp_path, monkeypatch):
+    """Grosse Datei -> Chunks werden in Sub-Batches <= embed_batch_size embedded,
+    nicht als EIN Riesen-Request (der das S0-Per-Request-Limit reisst)."""
+    monkeypatch.setattr(ing.settings, "embed_batch_size", 4)
+    big = "x" * (800 * 12)  # -> >= 12 Chunks (size 800, overlap 100)
+    res, calls, emb = _mk(tmp_path, existing={}, files={"A.md": big})
+    assert emb.embed_documents.call_count >= 3          # 12 Chunks / 4 -> >= 3 Requests
+    for c in emb.embed_documents.call_args_list:
+        assert len(c.args[0]) <= 4                       # kein Batch groesser als die Grenze
+    assert res.embedded >= 12                            # alle Chunks embedded + upserted
+
+
+def test_pace_enforces_min_interval(monkeypatch):
+    """_pace schlaeft, bis embed_min_interval_seconds seit dem letzten Request um
+    sind -- proaktive Drossel unabhaengig vom 429-Backoff."""
+    monkeypatch.setattr(ing.settings, "embed_min_interval_seconds", 3.0)
+    clock = {"t": 100.0}
+    slept: list[float] = []
+    monkeypatch.setattr(ing.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(ing.time, "sleep", lambda s: slept.append(s))
+    ing._last_embed_at[0] = 0.0
+    ing._pace()                     # erster Call: last=0 -> lange her -> kein Sleep
+    assert slept == []
+    ing._pace()                     # sofortiger zweiter Call -> volle 3s warten
+    assert slept and abs(slept[-1] - 3.0) < 0.01
+
+
+def test_pace_disabled_when_interval_zero(monkeypatch):
+    """interval <= 0 -> Drossel aus, kein Sleep (Backoff bleibt separat)."""
+    monkeypatch.setattr(ing.settings, "embed_min_interval_seconds", 0.0)
+    slept: list[float] = []
+    monkeypatch.setattr(ing.time, "sleep", lambda s: slept.append(s))
+    ing._last_embed_at[0] = 0.0
+    ing._pace()
+    ing._pace()
+    assert slept == []
 
 
 def _capture_heartbeat(monkeypatch, result):
