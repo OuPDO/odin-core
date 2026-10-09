@@ -4,17 +4,21 @@ from config.llm import get_azure_chat
 
 logger = logging.getLogger("odin.agents.router")
 
-INTENTS = {"knowledge", "om", "ado", "do", "chat"}
+INTENTS = {"knowledge", "wisdom", "om", "ado", "do", "chat"}
 
-_PROMPT = """Klassifiziere die Nachricht in genau EIN Label: knowledge, om, ado, do, chat.
+_PROMPT = """Klassifiziere die Nachricht in genau EIN Label: knowledge, wisdom, om, ado, do, chat.
 Beispiele:
 "welche projekte laufen gerade bei om" -> knowledge
 "was habe ich zum thema datev gemacht" -> knowledge
 "schick eine rechnung an kunde x" -> om
 "moin" -> chat
+"ist das eine gute idee, mein produkt als abo anzubieten" -> wisdom
+"was sagen erfolgreiche unternehmer zu preiserhoehungen" -> wisdom
+"gegencheck: ich will zuerst skalieren, dann den fokus schaerfen" -> wisdom
 
 Regeln:
 - knowledge: Frage nach Davids Projekten/Wissen/Notizen (Status, Recall).
+- wisdom: Gegencheck einer unternehmerischen Idee/Entscheidung oder Frage, was erfolgreiche Unternehmer/Millionaere dazu sagen (Preise, Sales, Skalierung, Fokus, Mindset).
 - om/ado/do: konkrete Aktion fuer die Organisation.
 - chat: Begruessung/Smalltalk.
 Antworte NUR mit dem Label.

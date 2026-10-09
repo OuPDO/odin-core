@@ -9,7 +9,7 @@ from telegram.ext import (
 )
 
 from config import settings
-from telegram_bot.handlers import handle_message, handle_voice, cmd_start, cmd_status, cmd_ask
+from telegram_bot.handlers import handle_message, handle_voice, cmd_start, cmd_status, cmd_ask, cmd_gegencheck
 
 logger = logging.getLogger("odin.telegram")
 
@@ -49,6 +49,7 @@ def create_bot() -> Application:
     app.add_handler(CommandHandler("start", cmd_start, filters=user_filter))
     app.add_handler(CommandHandler("status", cmd_status, filters=user_filter))
     app.add_handler(CommandHandler("ask", cmd_ask, filters=user_filter))
+    app.add_handler(CommandHandler("gegencheck", cmd_gegencheck, filters=user_filter))
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND & user_filter, handle_message)
     )

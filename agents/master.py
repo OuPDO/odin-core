@@ -10,6 +10,7 @@ from langgraph.graph import StateGraph, END
 from config.llm import get_llm
 from agents.router import classify_intent
 from knowledge.search import knowledge_search
+from knowledge.wisdom import wisdom_answer
 
 logger = logging.getLogger("odin.agents.master")
 
@@ -78,6 +79,9 @@ async def route_message(state: MasterState) -> dict:
     org_hint = detect_org_fast(msg)
 
     intent = await asyncio.to_thread(classify_intent, msg)
+    if intent == "wisdom":
+        logger.info("Routing: '%s' → wisdom", msg[:50])
+        return {"detected_org": "wisdom"}
     if intent == "knowledge":
         logger.info("Routing: '%s' → knowledge (org_hint=%s)", msg[:50], org_hint)
         return {
@@ -151,9 +155,14 @@ async def handle_knowledge(state: MasterState) -> dict:
     return {"response": answer}
 
 
-def route_to_org(state: MasterState) -> Literal["om", "ado", "do", "master", "knowledge"]:
+async def handle_wisdom(state: MasterState) -> dict:
+    answer = await asyncio.to_thread(wisdom_answer, state["message"])
+    return {"response": answer}
+
+
+def route_to_org(state: MasterState) -> Literal["om", "ado", "do", "master", "knowledge", "wisdom"]:
     org = state.get("detected_org", "master")
-    return org if org in {"om", "ado", "do", "knowledge"} else "master"
+    return org if org in {"om", "ado", "do", "knowledge", "wisdom"} else "master"
 
 
 def build_master_graph() -> StateGraph:
@@ -164,15 +173,18 @@ def build_master_graph() -> StateGraph:
     graph.add_node("do", handle_do)
     graph.add_node("master", handle_master)
     graph.add_node("knowledge", handle_knowledge)
+    graph.add_node("wisdom", handle_wisdom)
     graph.set_entry_point("route")
     graph.add_conditional_edges("route", route_to_org, {
         "om": "om", "ado": "ado", "do": "do", "master": "master", "knowledge": "knowledge",
+        "wisdom": "wisdom",
     })
     graph.add_edge("om", END)
     graph.add_edge("ado", END)
     graph.add_edge("do", END)
     graph.add_edge("master", END)
     graph.add_edge("knowledge", END)
+    graph.add_edge("wisdom", END)
     return graph
 
 

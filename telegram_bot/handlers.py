@@ -56,6 +56,23 @@ async def cmd_ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
 
+async def cmd_gegencheck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /gegencheck — Idee gegen den Wisdom-Speicher pruefen (nur lesend)."""
+    if update.effective_user.id not in settings.allowed_user_ids:
+        return
+    idea = update.message.text.partition(" ")[2].strip()
+    if not idea:
+        await update.message.reply_text("Nutzung: /gegencheck <deine Idee oder Entscheidung>")
+        return
+    await update.message.chat.send_action("typing")
+    from knowledge.wisdom import wisdom_answer
+    try:
+        await update.message.reply_text(await asyncio.to_thread(wisdom_answer, idea))
+    except Exception:
+        logger.exception("Fehler beim Gegencheck")
+        await update.message.reply_text("Da ist etwas schiefgelaufen. Ich schaue mir das an.")
+
+
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle voice messages: download, transcribe, route through ODIN Master."""
     if update.effective_user.id not in settings.allowed_user_ids:
