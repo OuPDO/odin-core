@@ -38,7 +38,8 @@ mcp = FastMCP(
     ),
 )
 
-for _fn in (tools.search_knowledge, tools.remember, tools.update_memory, tools.recall_about):
+for _fn in (tools.search_knowledge, tools.remember, tools.update_memory, tools.recall_about,
+            tools.wisdom_gegencheck, tools.wisdom_search):
     mcp.tool()(_fn)
 
 

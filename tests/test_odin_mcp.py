@@ -50,11 +50,34 @@ def test_remember_invalid_kind_raises_at_tool_boundary():
 
 
 @pytest.mark.asyncio
-async def test_server_registers_four_tools():
+async def test_server_registers_all_tools():
     import odin_mcp.server as server
     registered = await server.mcp.list_tools()
     names = {t.name for t in registered}
-    assert len(registered) == 4
-    assert names == {"search_knowledge", "remember", "update_memory", "recall_about"}
+    assert len(registered) == 6
+    assert names == {"search_knowledge", "remember", "update_memory", "recall_about",
+                     "wisdom_gegencheck", "wisdom_search"}
     # main ist aufrufbar (kein Start hier)
     assert callable(server.main)
+
+
+def test_wisdom_gegencheck_delegates_with_theme():
+    with patch.object(tools, "wisdom_answer", return_value="Fazit") as w:
+        assert tools.wisdom_gegencheck("Preis verdoppeln?", theme="pricing") == "Fazit"
+    w.assert_called_once_with("Preis verdoppeln?", theme="pricing")
+
+
+def test_wisdom_search_returns_structured_hits_and_clamps_top_k():
+    from unittest.mock import MagicMock
+    h = MagicMock()
+    h.score = 0.51234
+    h.payload = {"source_path": "abc-q1", "lesson_en": "L", "lesson_de": "Ld", "answer_en": "Q",
+                 "person": "Alex Hormozi", "theme": ["pricing"], "published": "2025-01-02",
+                 "stance": "own", "source_url": "https://www.youtube.com/watch?v=abc&t=3s"}
+    with patch.object(tools, "wisdom_hits", return_value=[h]) as wh:
+        out = tools.wisdom_search("preis", theme="pricing", top_k=500)
+    assert wh.call_args.kwargs["top_k"] == 20
+    assert out == [{"id": "abc-q1", "score": 0.5123, "lesson_en": "L", "lesson_de": "Ld", "quote_en": "Q",
+                    "person": "Alex Hormozi", "theme": ["pricing"], "published": "2025-01-02",
+                    "stance": "own", "source_url": "https://www.youtube.com/watch?v=abc&t=3s"}]
+

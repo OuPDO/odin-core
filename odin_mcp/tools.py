@@ -4,6 +4,7 @@ Getrennt vom FastMCP-Server, damit die Logik ohne SDK-Interna testbar bleibt.
 Cross-org: org ist Label/Filter, kein Zwang.
 """
 from knowledge.search import knowledge_search
+from knowledge.wisdom import wisdom_answer, wisdom_hits
 from memory import store
 
 
@@ -54,3 +55,47 @@ def recall_about(subject: str, kind: str | None = None) -> list[dict]:
         kind: Optionaler Typ-Filter (semantic | episodic | procedural).
     """
     return store.recall_about(subject, kind=kind)
+
+
+def wisdom_gegencheck(idea: str, theme: str | None = None) -> str:
+    """Gegencheck einer unternehmerischen Idee/Entscheidung gegen den Millionaers-Wissensspeicher.
+
+    Nur lesend. Liefert eine Antwort in vier Abschnitten (Ausrichtung, Abweichung und Risiko,
+    Blind Spots, Fazit) mit Quelllink je Aussage. Lektionen sind Interpretation, belegt ist der
+    O-Ton; das Datum ist das Upload-Datum.
+
+    Args:
+        idea: Die Idee, Entscheidung oder Frage (Deutsch oder Englisch).
+        theme: Optional eines von pricing, sales, marketing, mindset, discipline-habits,
+            hiring-team, leadership, wealth-building, investing, negotiation, starting-out,
+            scaling, exit, failure-resilience.
+    """
+    return wisdom_answer(idea, theme=theme)
+
+
+def wisdom_search(query: str, theme: str | None = None, person: str | None = None,
+                  top_k: int = 8) -> list[dict]:
+    """Strukturierte Treffer aus dem Wisdom-Speicher (ohne LLM-Synthese), nur lesend.
+
+    Jeder Treffer: id, score, lesson_en/de (Interpretation), quote_en (O-Ton), person, theme,
+    published (Upload-Datum oder null), stance, source_url (Deep-Link mit Zeitstempel).
+
+    Args:
+        query: Frage oder Stichworte.
+        theme: Optionaler Themenfilter (siehe wisdom_gegencheck).
+        person: Optionaler Personenfilter, z.B. "Alex Hormozi".
+        top_k: Anzahl Treffer (1 bis 20).
+    """
+    hits = wisdom_hits(query, theme=theme, person=person, top_k=max(1, min(int(top_k), 20)))
+    out = []
+    for h in hits:
+        p = h.payload or {}
+        out.append({
+            "id": p.get("source_path"), "score": round(float(getattr(h, "score", 0.0)), 4),
+            "lesson_en": p.get("lesson_en"), "lesson_de": p.get("lesson_de"),
+            "quote_en": p.get("answer_en"), "person": p.get("person"), "theme": p.get("theme"),
+            "published": p.get("published"), "stance": p.get("stance"),
+            "source_url": p.get("source_url"),
+        })
+    return out
+
