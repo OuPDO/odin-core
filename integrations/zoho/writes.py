@@ -11,7 +11,12 @@ import re
 from typing import Any
 
 from integrations.zoho.client import ZohoClient
-from integrations.zoho.errors import ZohoRequestError, safe_code
+from integrations.zoho.errors import (
+    ZohoAPIError,
+    ZohoOutcomeUnknown,
+    ZohoRequestError,
+    safe_code,
+)
 from integrations.zoho.shapes import dict_or_none, list_of_dicts
 from integrations.zoho.validation import is_id, validate_id
 from integrations.zoho.write_rules import (
@@ -48,8 +53,17 @@ def _result(item: dict) -> dict:
 
 
 def project(raw: dict | None) -> dict:
-    """{ok, results:[{id, status, code[, field]}]} from a Zoho write response."""
-    results = [_result(item) for item in list_of_dicts(raw or {}, "data")]
+    """{ok, results:[{id, status, code[, field]}]} from a Zoho write response.
+
+    The write was already dispatched, so a missing or malformed result list means the
+    outcome is unknown (raise), not that nothing happened."""
+    try:
+        items = list_of_dicts(raw or {}, "data")
+        results = [_result(item) for item in items]
+    except ZohoAPIError:
+        raise ZohoOutcomeUnknown("unexpected response shape") from None
+    if not results:
+        raise ZohoOutcomeUnknown("no per-record result")
     return {"ok": bool(results) and all(r["status"] == "success" for r in results),
             "results": results}
 

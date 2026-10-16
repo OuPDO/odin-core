@@ -9,6 +9,7 @@ from integrations.zoho.client import (
     ZohoAPIError,
     ZohoClient,
     ZohoConfig,
+    ZohoOutcomeUnknown,
     ZohoRequestError,
 )
 
@@ -123,12 +124,13 @@ async def test_result_is_projected_never_the_full_body(client, router):
 
 async def test_per_record_error_is_reported_with_safe_code_and_field(client, router):
     TokenMock(router)
-    router.post(f"{API}/crm/v6/Leads").mock(return_value=httpx.Response(201, json={"data": [{
+    route = router.post(f"{API}/crm/v6/Leads").mock(return_value=httpx.Response(400, json={"data": [{
         "code": "DUPLICATE_DATA", "status": "error", "message": "duplicate",
         "details": {"api_name": "Email", "id": "5", "duplicate_record": {"id": "5"}}}]}))
     result = await writes.create(client, "om", "Leads", {"Last_Name": "x"})
     assert result == {"ok": False, "results": [
         {"id": "5", "status": "error", "code": "DUPLICATE_DATA", "field": "Email"}]}
+    assert route.call_count == 1  # a confirmed rejection is never retried
 
 
 async def test_unknown_upstream_values_are_neutralised(client, router):
@@ -150,19 +152,46 @@ async def test_http_error_becomes_sanitized_api_error(client, router):
     assert "SECRET-DETAIL" not in str(exc.value)
 
 
-@pytest.mark.parametrize("raw", [{"data": "x"}, {"data": ["x"]}])
-async def test_unexpected_shape_is_clean_error(raw, client, router):
+@pytest.mark.parametrize("response", [
+    httpx.Response(201, json={"data": "x"}), httpx.Response(201, json={"data": ["x"]}),
+    httpx.Response(201, json={}), httpx.Response(201, json={"data": []}),
+    httpx.Response(201, text="<html>"), httpx.Response(200, json=[1]), httpx.Response(204),
+    httpx.Response(500, json={"code": "INTERNAL_ERROR"}), httpx.Response(502),
+    httpx.Response(503, json={"data": [{"code": "SUCCESS", "status": "success"}]}),
+    httpx.Response(307, headers={"location": "https://evil.example/x"}),
+])
+async def test_unclear_result_after_dispatch_is_outcome_unknown(response, client, router):
     TokenMock(router)
-    router.post(f"{API}/crm/v6/Leads").mock(return_value=httpx.Response(201, json=raw))
-    with pytest.raises(ZohoAPIError):
+    route = router.post(f"{API}/crm/v6/Leads").mock(return_value=response)
+    with pytest.raises(ZohoOutcomeUnknown, match="outcome_unknown: Ergebnis unbekannt"):
         await writes.create(client, "om", "Leads", {"Last_Name": "x"})
+    assert route.call_count == 1
 
 
-async def test_empty_data_is_not_ok(client, router):
+@pytest.mark.parametrize("response", [
+    httpx.Response(400, json={"code": "INVALID_DATA"}),  # no record envelope
+    httpx.Response(400, text="x"), httpx.Response(403, json={"code": "NO_PERMISSION"}),
+    httpx.Response(404, json={}), httpx.Response(429, json={"code": "TOO_MANY_REQUESTS"}),
+])
+async def test_other_4xx_is_a_confirmed_rejection_not_unknown(response, client, router):
     TokenMock(router)
-    router.post(f"{API}/crm/v6/Leads").mock(return_value=httpx.Response(201, json={}))
-    assert await writes.create(client, "om", "Leads", {"Last_Name": "x"}) == {
-        "ok": False, "results": []}
+    route = router.post(f"{API}/crm/v6/Leads").mock(return_value=response)
+    with pytest.raises(ZohoAPIError, match="HTTP 4") as exc:
+        await writes.create(client, "om", "Leads", {"Last_Name": "x"})
+    assert not isinstance(exc.value, ZohoOutcomeUnknown)
+    assert route.call_count == 1
+
+
+async def test_http_400_envelope_through_the_client_is_sanitized(client, router):
+    TokenMock(router)
+    router.post(f"{API}/crm/v6/Leads").mock(return_value=httpx.Response(400, json={
+        "data": [{"code": "UNKNOWN_<b>", "status": "error", "message": "SECRET",
+                  "details": {"api_name": "Email", "id": "5", "$x": 1, "duplicate_record": {
+                      "Owner": {"name": "Hans"}}}}]}))
+    result = await writes.create(client, "om", "Leads", {"Last_Name": "x"})
+    assert result == {"ok": False, "results": [
+        {"id": "5", "status": "error", "code": "upstream_error", "field": "Email"}]}
+    assert "SECRET" not in str(result) and "Hans" not in str(result)
 
 
 # ---- rejections with zero network ------------------------------------------------------------
@@ -235,7 +264,7 @@ async def test_org_without_credentials_rejected_before_network(router):
 async def test_write_is_never_retried_after_a_network_error(error, client, router):
     TokenMock(router)
     route = router.post(f"{API}/crm/v6/Leads").mock(side_effect=error)
-    with pytest.raises(ZohoAPIError, match="outcome unknown"):
+    with pytest.raises(ZohoAPIError, match="outcome_unknown"):
         await writes.create(client, "om", "Leads", {"Last_Name": "x"})
     assert route.call_count == 1
 
@@ -255,7 +284,7 @@ async def test_write_overall_deadline_is_not_retried(client, router, monkeypatch
         return ok()
 
     router.put(f"{API}/crm/v6/Leads/1").mock(side_effect=slow)
-    with pytest.raises(ZohoAPIError, match="outcome unknown"):
+    with pytest.raises(ZohoAPIError, match="outcome_unknown"):
         await writes.update(client, "om", "Leads", "1", {"Last_Name": "x"})
     assert len(seen) == 1
 

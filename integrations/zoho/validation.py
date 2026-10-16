@@ -29,7 +29,9 @@ CRM_MAX_TEXT = 200
 BOOKS_MAX_TEXT = 100
 NOTES_FIELDS = "Note_Title,Note_Content,Created_Time,Modified_Time,Owner"
 ESTIMATE_STATUSES = ("draft", "sent", "invoiced", "accepted", "declined", "expired")
-MARKABLE_STATUSES = ("sent", "accepted", "declined")  # POST .../status/<x>: marks only, no mail
+# POST .../status/<x>. `accepted` is excluded on purpose: Books can auto-create and e-mail an
+# invoice when a quote is accepted (quote preferences), which would break the no-mail limit.
+MARKABLE_STATUSES = ("sent", "declined")
 
 # Callers cannot choose CRM fields: every request carries exactly this list for its module,
 # and responses are projected to it (see crm.py). Names are standard Zoho API names.

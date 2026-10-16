@@ -11,7 +11,12 @@ from typing import Any
 
 from integrations.zoho.client import ZohoClient
 from integrations.zoho.config import BOOKS_ORG
-from integrations.zoho.errors import MAX_NUMERIC_CODE, ZohoRequestError
+from integrations.zoho.errors import (
+    MAX_NUMERIC_CODE,
+    ZohoAPIError,
+    ZohoOutcomeUnknown,
+    ZohoRequestError,
+)
 from integrations.zoho.shapes import dict_or_none
 from integrations.zoho.validation import MARKABLE_STATUSES, validate_id
 from integrations.zoho.write_rules import validate_books_fields
@@ -24,13 +29,24 @@ ITEM_RESULT_KEYS = ("item_id", "name", "rate", "status")
 
 
 def _project(raw: dict | None, entity: str | None, keys: tuple[str, ...]) -> dict:
+    """Projection of a Books write response. A dispatched write without a usable numeric
+    code, or a successful create without its entity, is an unknown outcome (raise)."""
     raw = raw or {}
     code = raw.get("code")
     if isinstance(code, bool) or not isinstance(code, int) or not 0 <= code <= MAX_NUMERIC_CODE:
-        code = None
-    item = dict_or_none(raw, entity) if entity else None
-    return {"ok": code == 0, "code": code,
-            "data": None if item is None else {k: item[k] for k in keys if k in item}}
+        raise ZohoOutcomeUnknown("no usable result code")
+    try:
+        item = dict_or_none(raw, entity) if entity else None
+    except ZohoAPIError:
+        raise ZohoOutcomeUnknown("unexpected response shape") from None
+    if entity and code == 0 and item is None:
+        raise ZohoOutcomeUnknown("no result entity")
+    out: dict[str, Any] = {"ok": code == 0, "code": code,
+                           "data": None if item is None else {k: item[k] for k in keys
+                                                              if k in item}}
+    if code != 0:
+        out["message"] = f"Zoho Books hat die Anfrage abgelehnt (Code {code})"
+    return out
 
 
 async def _send(client: ZohoClient, method: str, path: str, body: Any, entity: str | None,

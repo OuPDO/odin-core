@@ -14,7 +14,7 @@ from integrations.zoho.client import ZohoClient
 
 Org = Literal["om", "ado"]
 Module = Literal["Leads", "Contacts", "Deals", "Accounts"]
-MarkStatus = Literal["sent", "accepted", "declined"]
+MarkStatus = Literal["sent", "declined"]
 
 
 class ZohoWriteTools:
@@ -131,9 +131,12 @@ class ZohoWriteTools:
     async def books_mark_estimate(self, id: str, status: MarkStatus) -> dict[str, Any]:
         """Angebotsstatus in Zoho Books setzen (nur OM, markiert nur, sendet nie Mails).
 
+        Angebot annehmen bitte in Zoho Books selbst (Annahme kann dort automatisch eine
+        Rechnung erzeugen und versenden, das ist hier bewusst nicht moeglich).
+
         Args:
             id: Angebots-ID, nur Ziffern.
-            status: sent, accepted oder declined.
+            status: sent oder declined.
         """
         return await books_write.mark_estimate(self._client, id, status)
 

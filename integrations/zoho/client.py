@@ -25,6 +25,7 @@ from integrations.zoho.config import BOOKS_ORG, ORGS, OrgCredentials, ZohoConfig
 from integrations.zoho.errors import (
     ZohoAPIError,
     ZohoError,
+    ZohoOutcomeUnknown,
     ZohoRequestError,
     safe_code,
 )
@@ -52,6 +53,7 @@ __all__ = [
     "ZohoClient",
     "ZohoConfig",
     "ZohoError",
+    "ZohoOutcomeUnknown",
     "ZohoRequestError",
     "strip_dollar_keys",
     "validate_id",
@@ -89,7 +91,16 @@ def _is_invalid_token(body: bytes, books: bool) -> bool:
 
 
 OK_STATUSES = {"GET": (200, 204), "POST": (200, 201, 202, 204), "PUT": (200, 201, 202, 204)}
-OUTCOME_UNKNOWN = "; outcome unknown, check before retrying"
+
+
+def _is_rejection_envelope(parsed: Any, books: bool) -> bool:
+    if not isinstance(parsed, dict):
+        return False
+    if books:
+        code = parsed.get("code")
+        return isinstance(code, int) and not isinstance(code, bool)
+    data = parsed.get("data")
+    return isinstance(data, list) and bool(data) and all(isinstance(i, dict) for i in data)
 
 
 class ZohoClient:
@@ -123,12 +134,13 @@ class ZohoClient:
         org = self._resolve_org(org, endpoint)
         if endpoint.books:
             query["organization_id"] = self._config.books_organization_id or ""
-        suffix = "" if endpoint.method == "GET" else OUTCOME_UNKNOWN
         try:
             async with asyncio.timeout(OVERALL_TIMEOUT_SECONDS):
                 return await self._with_retry(org, endpoint, path, query, body)
         except TimeoutError:
-            raise ZohoAPIError("Zoho request timed out" + suffix) from None
+            if endpoint.method == "GET":
+                raise ZohoAPIError("Zoho request timed out") from None
+            raise ZohoOutcomeUnknown("Zoho request timed out") from None
 
     async def _with_retry(self, org: str, endpoint: Endpoint, path: str, query: dict,
                           body: Any) -> dict | None:
@@ -145,7 +157,9 @@ class ZohoClient:
                 self._tokens.cool_down(org)
         if status in OK_STATUSES[endpoint.method]:
             self._tokens.confirmed(org, token)
-        return self._parse(status, body_bytes, endpoint.method)
+        if endpoint.method != "GET":
+            return self._parse_write(status, body_bytes, endpoint.books)
+        return self._parse(status, body_bytes)
 
     @staticmethod
     def _token_rejected(status: int, body: bytes, endpoint: Endpoint) -> bool:
@@ -172,11 +186,35 @@ class ZohoClient:
         except ZohoAPIError as exc:
             if method == "GET":
                 raise
-            raise ZohoAPIError(str(exc) + OUTCOME_UNKNOWN) from None
+            raise ZohoOutcomeUnknown(str(exc)) from None
 
     def _http(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS, transport=self._transport,
                                  follow_redirects=False)
+
+    @staticmethod
+    def _parse_write(status: int, body: bytes, books: bool) -> dict:
+        """2xx with a JSON object, or a 400 that carries Zoho's per-record / numeric-code
+        rejection envelope, is returned for projection. Other 4xx are confirmed rejections.
+        Everything else (5xx, odd statuses, unreadable 2xx) leaves the outcome unknown."""
+        parsed = parse_json(body)
+        if 200 <= status < 300:
+            if status == 204 or not isinstance(parsed, dict):
+                raise ZohoOutcomeUnknown("unreadable response")
+            return ZohoClient._strip(parsed, ZohoOutcomeUnknown("unreadable response"))
+        if status == 400 and _is_rejection_envelope(parsed, books):
+            return ZohoClient._strip(parsed, ZohoOutcomeUnknown("unreadable response"))
+        if 400 <= status < 500:
+            code = safe_code(parsed.get("code") if isinstance(parsed, dict) else None)
+            raise ZohoAPIError(f"Zoho API returned HTTP {status}, {code}")
+        raise ZohoOutcomeUnknown(f"HTTP {status}")
+
+    @staticmethod
+    def _strip(parsed: dict, error: ZohoAPIError) -> dict:
+        try:
+            return strip_dollar_keys(parsed)
+        except RecursionError:
+            raise error from None
 
     @staticmethod
     def _parse(status: int, body: bytes, method: str = "GET") -> dict | None:

@@ -19,6 +19,7 @@ from integrations.zoho.client import (
     ZohoAPIError,
     ZohoClient,
     ZohoConfig,
+    ZohoOutcomeUnknown,
     ZohoRequestError,
 )
 
@@ -124,7 +125,7 @@ async def test_create_and_update_estimate(client, router):
     assert "send" not in create.calls.last.request.url.params
 
 
-@pytest.mark.parametrize("state", ["sent", "accepted", "declined"])
+@pytest.mark.parametrize("state", ["sent", "declined"])
 async def test_mark_estimate_has_no_body_and_no_query_beyond_org(state, client, router):
     TokenMock(router)
     route = router.post(f"{API}/books/v3/estimates/7/status/{state}", params=ORG).mock(
@@ -149,21 +150,40 @@ async def test_create_item(client, router):
                               "status": "active"}
 
 
-async def test_books_error_is_sanitized(client, router):
+async def test_books_400_envelope_is_returned_sanitized_without_retry(client, router):
     TokenMock(router)
-    router.post(f"{API}/books/v3/items").mock(return_value=httpx.Response(
+    route = router.post(f"{API}/books/v3/items").mock(return_value=httpx.Response(
         400, json={"code": 1001, "message": "SECRET-MESSAGE"}))
-    with pytest.raises(ZohoAPIError, match="HTTP 400, 1001") as exc:
-        await books_write.create_item(client, {"name": "x"})
-    assert "SECRET" not in str(exc.value)
+    result = await books_write.create_item(client, {"name": "x"})
+    assert route.call_count == 1
+    assert result == {"ok": False, "code": 1001, "data": None,
+                      "message": "Zoho Books hat die Anfrage abgelehnt (Code 1001)"}
+    assert "SECRET" not in str(result)
 
 
-async def test_books_unexpected_entity_shape_is_clean_error(client, router):
+async def test_books_other_4xx_is_a_confirmed_rejection(client, router):
     TokenMock(router)
     router.post(f"{API}/books/v3/items").mock(return_value=httpx.Response(
-        201, json={"code": 0, "item": "x"}))
-    with pytest.raises(ZohoAPIError):
+        404, json={"code": 2, "message": "SECRET"}))
+    with pytest.raises(ZohoAPIError, match="HTTP 404, 2") as exc:
         await books_write.create_item(client, {"name": "x"})
+    assert not isinstance(exc.value, ZohoOutcomeUnknown)
+
+
+@pytest.mark.parametrize("response", [
+    httpx.Response(500, json={"code": 0}), httpx.Response(502, text="bad gateway"),
+    httpx.Response(201, text="not json"), httpx.Response(201, json=[1]),
+    httpx.Response(204), httpx.Response(201, json={"code": 0}),  # create without entity
+    httpx.Response(201, json={"message": "no code"}),
+    httpx.Response(201, json={"code": 0, "item": "x"}),
+    httpx.Response(503),
+])
+async def test_books_unclear_result_is_outcome_unknown(response, client, router):
+    TokenMock(router)
+    route = router.post(f"{API}/books/v3/items").mock(return_value=response)
+    with pytest.raises(ZohoOutcomeUnknown, match="outcome_unknown.*Ergebnis unbekannt"):
+        await books_write.create_item(client, {"name": "x"})
+    assert route.call_count == 1
 
 
 async def test_books_nonzero_code_with_200_is_not_ok(client, router):
@@ -190,6 +210,7 @@ async def test_books_nonzero_code_with_200_is_not_ok(client, router):
     lambda c: books_write.update_contact(c, "1", {"payment_reminder_enabled": True}),
     lambda c: books_write.create_item(c, {"name": "x", "send": True}),
     lambda c: books_write.mark_estimate(c, "1", "draft"),
+    lambda c: books_write.mark_estimate(c, "1", "accepted"),
     lambda c: books_write.mark_estimate(c, "1", "send"),
     lambda c: books_write.mark_estimate(c, "1/email", "sent"),
     lambda c: books_write.mark_estimate(c, "abc", "sent"),
@@ -236,7 +257,7 @@ async def test_books_writes_need_om_credentials_and_books_id(router):
 async def test_books_write_not_retried_on_timeout_but_retried_on_invalid_token(client, router):
     token = TokenMock(router)
     route = router.post(f"{API}/books/v3/items").mock(side_effect=httpx.ReadTimeout("slow"))
-    with pytest.raises(ZohoAPIError, match="outcome unknown"):
+    with pytest.raises(ZohoAPIError, match="outcome_unknown"):
         await books_write.create_item(client, {"name": "x"})
     assert route.call_count == 1
     route.mock(side_effect=[httpx.Response(401, json={"code": 57}),
@@ -246,9 +267,9 @@ async def test_books_write_not_retried_on_timeout_but_retried_on_invalid_token(c
 
 
 @pytest.mark.parametrize("code", [True, "0", None, -1, 10**9])
-async def test_books_unusable_code_is_not_ok_and_not_echoed(code, client, router):
+async def test_books_unusable_code_is_outcome_unknown(code, client, router):
     TokenMock(router)
     router.post(f"{API}/books/v3/items").mock(return_value=httpx.Response(
         201, json={"code": code, "item": {"item_id": "1"}}))
-    result = await books_write.create_item(client, {"name": "x"})
-    assert result["ok"] is False and result["code"] is None
+    with pytest.raises(ZohoOutcomeUnknown):
+        await books_write.create_item(client, {"name": "x"})

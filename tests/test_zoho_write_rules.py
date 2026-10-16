@@ -255,12 +255,12 @@ def test_books_fields_must_be_non_empty_dict(fields):
 
 
 def test_validator_rejects_estimate_status_outside_enum():
-    for state in ("draft", "invoiced", "expired", "SENT", "sent%2F", "send"):
+    for state in ("draft", "invoiced", "expired", "accepted", "SENT", "sent%2F", "send"):
         with pytest.raises(ZohoRequestError):
             validate_request("POST", f"/books/v3/estimates/1/status/{state}", {})
 
 
-@pytest.mark.parametrize("state", ["sent", "accepted", "declined"])
+@pytest.mark.parametrize("state", ["sent", "declined"])
 def test_mark_status_endpoints_exist_and_take_no_body(state):
     validate_request("POST", f"/books/v3/estimates/1/status/{state}", {})
     with pytest.raises(ZohoRequestError):

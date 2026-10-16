@@ -51,7 +51,7 @@ async def test_schemas_have_no_trigger_owner_or_reminder_parameters():
     assert set(task) == {"org", "subject", "due_date", "related_module", "related_id",
                          "description"}
     assert set(tools["zoho_books_mark_estimate"]["inputSchema"]["properties"]["status"]
-               ["enum"]) == {"sent", "accepted", "declined"}
+               ["enum"]) == {"sent", "declined"}
 
 
 async def test_no_delete_tool_exists():
@@ -100,7 +100,7 @@ async def test_books_write_tools_end_to_end(router):
         return_value=httpx.Response(201, json={"code": 0, "estimate": {"estimate_id": "2"}}))
     upd_est = router.put(f"{API}/books/v3/estimates/2", params=ORG).mock(
         return_value=httpx.Response(200, json={"code": 0, "estimate": {"estimate_id": "2"}}))
-    mark = router.post(f"{API}/books/v3/estimates/2/status/accepted", params=ORG).mock(
+    mark = router.post(f"{API}/books/v3/estimates/2/status/sent", params=ORG).mock(
         return_value=httpx.Response(200, json={"code": 0}))
     item = router.post(f"{API}/books/v3/items", params=ORG).mock(
         return_value=httpx.Response(201, json={"code": 0, "item": {"item_id": "3"}}))
@@ -113,7 +113,7 @@ async def test_books_write_tools_end_to_end(router):
         ("zoho_books_update_contact", {"id": "1", "fields": {"contact_name": "Y"}}),
         ("zoho_books_create_estimate", {"fields": {"customer_id": "1"}}),
         ("zoho_books_update_estimate", {"id": "2", "fields": {"notes": "n"}}),
-        ("zoho_books_mark_estimate", {"id": "2", "status": "accepted"}),
+        ("zoho_books_mark_estimate", {"id": "2", "status": "sent"}),
         ("zoho_books_create_item", {"fields": {"name": "n"}}),
         ("zoho_books_list_items", {}),
         ("zoho_books_list_taxes", {}),
@@ -136,6 +136,7 @@ async def test_books_write_tools_end_to_end(router):
     ("zoho_books_create_estimate", {"fields": {"customer_id": "1", "to_mail_ids": ["a@b.de"]}}),
     ("zoho_books_create_contact", {"fields": {"contact_name": "x", "is_portal_enabled": True}}),
     ("zoho_books_mark_estimate", {"id": "1", "status": "draft"}),
+    ("zoho_books_mark_estimate", {"id": "1", "status": "accepted"}),
     ("zoho_books_update_estimate", {"id": "1/email", "fields": {"notes": "x"}}),
 ])
 async def test_rejected_write_is_tool_error_with_zero_upstream_calls(name, args, router):

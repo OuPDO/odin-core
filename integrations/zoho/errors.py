@@ -35,6 +35,15 @@ class ZohoAPIError(ZohoError):
     """Zoho (or the network) failed; text is sanitized."""
 
 
+class ZohoOutcomeUnknown(ZohoAPIError):
+    """A write was dispatched but its result is unknown (network error, timeout, 5xx,
+    unreadable or incomplete response). Never retry blindly: check Zoho first."""
+
+    def __init__(self, reason: str):
+        super().__init__(
+            f"outcome_unknown: Ergebnis unbekannt, vor Wiederholung in Zoho prüfen ({reason})")
+
+
 def safe_code(raw: Any) -> str:
     """Map an upstream error code to the allowlist, else to `upstream_error`."""
     if isinstance(raw, bool):
