@@ -1,9 +1,13 @@
-"""Read-only Zoho HTTP client (CRM v6, Books v3).
+"""Zoho HTTP client (CRM v6, Books v3): reads and a fixed set of writes.
 
 Hard guarantees, enforced before any network I/O:
 
-* Data requests are GET only and must match a fixed allowlist of anchored path
-  patterns with fixed, validated query parameters per endpoint (validation.py).
+* Data requests must match a fixed allowlist of (method, anchored path pattern, query keys,
+  body shape) entries (validation.py, write_rules.py). Reads are GET; writes are POST/PUT
+  on a few exact paths. There are no deletes and no mail, reminder or portal routes: a
+  secondary denylist rejects those even if the allowlist were widened.
+* A write is sent once. After a network error or timeout it is never retried (the outcome is
+  unknown); only a 401 INVALID_TOKEN (request rejected, not executed) is retried once.
   Paths are built by the callers from enum modules and digit-only ids.
 * The only non-GET call is the OAuth token mint (`grant_type=refresh_token`),
   hardcoded to `{accounts_url}/oauth/v2/token` (tokens.py). EU hosts only.
@@ -84,8 +88,12 @@ def _is_invalid_token(body: bytes, books: bool) -> bool:
     return isinstance(code, str) and code in CRM_INVALID_TOKEN_CODES
 
 
+OK_STATUSES = {"GET": (200, 204), "POST": (200, 201, 202, 204), "PUT": (200, 201, 202, 204)}
+OUTCOME_UNKNOWN = "; outcome unknown, check before retrying"
+
+
 class ZohoClient:
-    """GET-only Zoho client with per-org token caches. No write verbs exist on purpose."""
+    """Zoho client with per-org token caches; only allowlisted requests can be sent."""
 
     def __init__(self, config: ZohoConfig, *, transport: httpx.AsyncBaseTransport | None = None):
         silence_http_loggers()
@@ -102,30 +110,42 @@ class ZohoClient:
         """Validated GET against the Zoho API. Returns sanitized JSON (dict) or None (204)."""
         query: dict[str, str | int] = dict(params or {})
         endpoint = validate_request("GET", path, query)
+        return await self._execute(org, endpoint, path, query, None)
+
+    async def write(self, org: str, method: str, path: str, body: Any) -> dict | None:
+        """Validated POST/PUT (allowlisted paths and body shapes only). Never retried after a
+        network error or timeout; the error text then says the outcome is unknown."""
+        endpoint = validate_request(method, path, {}, body)
+        return await self._execute(org, endpoint, path, {}, body)
+
+    async def _execute(self, org: str, endpoint: Endpoint, path: str, query: dict,
+                       body: Any) -> dict | None:
         org = self._resolve_org(org, endpoint)
         if endpoint.books:
             query["organization_id"] = self._config.books_organization_id or ""
+        suffix = "" if endpoint.method == "GET" else OUTCOME_UNKNOWN
         try:
             async with asyncio.timeout(OVERALL_TIMEOUT_SECONDS):
-                return await self._get_with_retry(org, endpoint, path, query)
+                return await self._with_retry(org, endpoint, path, query, body)
         except TimeoutError:
-            raise ZohoAPIError("Zoho request timed out") from None
+            raise ZohoAPIError("Zoho request timed out" + suffix) from None
 
-    async def _get_with_retry(self, org: str, endpoint: Endpoint, path: str,
-                              query: dict) -> dict | None:
+    async def _with_retry(self, org: str, endpoint: Endpoint, path: str, query: dict,
+                          body: Any) -> dict | None:
         token = await self._tokens.get(org)
-        status, body = await self._send(token, path, query)
-        if self._token_rejected(status, body, endpoint) and not self._tokens.rejected(org, token):
+        status, body_bytes = await self._send(token, endpoint.method, path, query, body)
+        if self._token_rejected(status, body_bytes, endpoint) and not self._tokens.rejected(
+                org, token):
             # not a failed replacement: mint one fresh token and retry once
             token = await self._tokens.get(org)
-            status, body = await self._send(token, path, query)
-            if self._token_rejected(status, body, endpoint):
+            status, body_bytes = await self._send(token, endpoint.method, path, query, body)
+            if self._token_rejected(status, body_bytes, endpoint):
                 # the retry token is rejected too: evict it and stop hammering Zoho
                 self._tokens.rejected(org, token)
                 self._tokens.cool_down(org)
-        if status in (200, 204):
+        if status in OK_STATUSES[endpoint.method]:
             self._tokens.confirmed(org, token)
-        return self._parse(status, body)
+        return self._parse(status, body_bytes, endpoint.method)
 
     @staticmethod
     def _token_rejected(status: int, body: bytes, endpoint: Endpoint) -> bool:
@@ -141,22 +161,29 @@ class ZohoClient:
                 f"org not configured; available: {', '.join(self._config.crm_orgs) or 'none'}")
         return org
 
-    async def _send(self, token: str, path: str, query: dict) -> tuple[int, bytes]:
+    async def _send(self, token: str, method: str, path: str, query: dict,
+                    body: Any) -> tuple[int, bytes]:
         headers = {"Authorization": f"Zoho-oauthtoken {token}", "Accept": "application/json"}
-        async with self._http() as http:
-            return await fetch(http, "GET", self._config.api_domain + path, "request",
-                               params=query, headers=headers)
+        extra = {} if body is None else {"json": body}
+        try:
+            async with self._http() as http:
+                return await fetch(http, method, self._config.api_domain + path, "request",
+                                   params=query, headers=headers, **extra)
+        except ZohoAPIError as exc:
+            if method == "GET":
+                raise
+            raise ZohoAPIError(str(exc) + OUTCOME_UNKNOWN) from None
 
     def _http(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS, transport=self._transport,
                                  follow_redirects=False)
 
     @staticmethod
-    def _parse(status: int, body: bytes) -> dict | None:
+    def _parse(status: int, body: bytes, method: str = "GET") -> dict | None:
         if status == 204:
             return None
         parsed = parse_json(body)
-        if status != 200:
+        if status not in OK_STATUSES[method]:
             code = safe_code(parsed.get("code") if isinstance(parsed, dict) else None)
             raise ZohoAPIError(f"Zoho API returned HTTP {status}, {code}")
         if not isinstance(parsed, dict):

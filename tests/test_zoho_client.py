@@ -69,7 +69,7 @@ def test_only_get_is_allowed(method):
     "/crm/v6/Leads/12?x=1", "/crm/v6/Leads/1&x=2", "/crm/v6/Leads/ 1", "/crm/v6/Leads/1\n",
     "/crm/v6/Leads/1/Notes/", "/crm/v6/Leads/1/Attachments", "/crm/v6/Leads/123/actions/send_mail",
     "/crm/v6/leads/1", "/crm/v2/Leads/1", "/crm/v6/Leads/" + "1" * 26, "/crm/v6/Leads/١٢",
-    "/books/v3/items", "/books/v3/settings/taxes", "/books/v3/contacts/1/email",
+    "/books/v3/settings", "/books/v3/settings/currencies", "/books/v3/contacts/1/email",
     "/books/v3/estimates/1/email", "/books/v3/invoices", "/books/v3/contacts/1/..",
     "//crm/v6/Leads/1", "crm/v6/Leads/1", "https://evil.example/crm/v6/Leads/1",
 ])

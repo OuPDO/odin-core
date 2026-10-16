@@ -11,6 +11,15 @@ from functools import partial
 from typing import Any
 
 from integrations.zoho.errors import ZohoRequestError
+from integrations.zoho.write_rules import (
+    check_denied,
+    validate_contact_body,
+    validate_estimate_body,
+    validate_item_body,
+    validate_note_body,
+    validate_record_body,
+    validate_task_body,
+)
 
 PER_PAGE = 50
 CRM_MAX_PAGE = 40
@@ -20,6 +29,7 @@ CRM_MAX_TEXT = 200
 BOOKS_MAX_TEXT = 100
 NOTES_FIELDS = "Note_Title,Note_Content,Created_Time,Modified_Time,Owner"
 ESTIMATE_STATUSES = ("draft", "sent", "invoiced", "accepted", "declined", "expired")
+MARKABLE_STATUSES = ("sent", "accepted", "declined")  # POST .../status/<x>: marks only, no mail
 
 # Callers cannot choose CRM fields: every request carries exactly this list for its module,
 # and responses are projected to it (see crm.py). Names are standard Zoho API names.
@@ -130,6 +140,8 @@ class Endpoint:
     exactly_one_of: frozenset[str] = frozenset()
     books: bool = False
     module_rules: Mapping[str, ModuleValidator] | None = None  # bound to the path's module
+    method: str = "GET"
+    body_rule: ModuleValidator | None = None  # None: the request carries no body
 
 
 _crm_text = partial(validate_text, what="search value", min_len=CRM_MIN_TEXT,
@@ -144,9 +156,16 @@ _PAGING_KEYS = frozenset({"page", "per_page"})
 
 def _ep(pattern: str, rules: Mapping[str, Validator], required: tuple = (),
         one_of: frozenset = frozenset(), books: bool = False,
-        module_rules: Mapping[str, ModuleValidator] | None = None) -> Endpoint:
+        module_rules: Mapping[str, ModuleValidator] | None = None, method: str = "GET",
+        body_rule: ModuleValidator | None = None) -> Endpoint:
     return Endpoint(re.compile(pattern), rules, frozenset(required), one_of, books,
-                    module_rules)
+                    module_rules, method, body_rule)
+
+
+def _write(method: str, pattern: str, body_rule: ModuleValidator | None,
+           books: bool = False) -> Endpoint:
+    """Write endpoint: no query parameters at all, a body that must pass `body_rule`."""
+    return _ep(pattern, {}, books=books, method=method, body_rule=body_rule)
 
 
 _ANY = str  # the module-bound rule does the real check; the generic rule only types the value
@@ -173,21 +192,46 @@ ALLOWED_ENDPOINTS = (
         {"status": validate_status, "customer_id": _customer_id, **_BOOKS_PAGING},
         required=_PAGING_KEYS, books=True),
     _ep(rf"/books/v3/estimates/{_ID}", {}, books=True),
+    _ep("/books/v3/items", dict(_BOOKS_PAGING), required=_PAGING_KEYS, books=True),
+    _ep("/books/v3/settings/taxes", {}, books=True),
+    # ---- writes: exact method, path and body shape; never mail, delete or invoices ----
+    _write("POST", rf"/crm/v6/{_MODULES}", validate_record_body),
+    _write("PUT", rf"/crm/v6/{_MODULES}/{_ID}", validate_record_body),
+    _write("POST", rf"/crm/v6/{_MODULES}/{_ID}/Notes", validate_note_body),
+    _write("POST", "/crm/v6/Tasks", validate_task_body),
+    _write("POST", "/books/v3/contacts", validate_contact_body, books=True),
+    _write("PUT", rf"/books/v3/contacts/{_ID}", validate_contact_body, books=True),
+    _write("POST", "/books/v3/estimates", validate_estimate_body, books=True),
+    _write("PUT", rf"/books/v3/estimates/{_ID}", validate_estimate_body, books=True),
+    _write("POST", rf"/books/v3/estimates/{_ID}/status/({'|'.join(MARKABLE_STATUSES)})", None,
+           books=True),
+    _write("POST", "/books/v3/items", validate_item_body, books=True),
 )
 
 
-def validate_request(method: str, path: str, params: Mapping[str, Any]) -> Endpoint:
-    """Raise ZohoRequestError unless (method, path, query) is allowed; return the endpoint."""
-    if method != "GET":
-        raise ZohoRequestError("only GET requests are allowed")
+def validate_request(method: str, path: str, params: Mapping[str, Any],
+                     body: Any = None) -> Endpoint:
+    """Raise ZohoRequestError unless (method, path, query, body) is allowed; return the endpoint."""
+    if method not in ("GET", "POST", "PUT"):
+        raise ZohoRequestError("method not allowed")
     if not isinstance(path, str):
         raise ZohoRequestError("path not allowed")
+    check_denied(method, path, params)
     for endpoint in ALLOWED_ENDPOINTS:
         match = endpoint.pattern.fullmatch(path)
-        if match:
+        if match and endpoint.method == method:
             _validate_query(endpoint, params, match.groupdict().get("module"))
+            _validate_body(endpoint, body, match.groupdict().get("module"))
             return endpoint
     raise ZohoRequestError("path not allowed")
+
+
+def _validate_body(endpoint: Endpoint, body: Any, module: str | None) -> None:
+    if endpoint.body_rule is None:
+        if body is not None:
+            raise ZohoRequestError("this request takes no body")
+        return
+    endpoint.body_rule(body, module)
 
 
 def _validate_query(endpoint: Endpoint, params: Mapping[str, Any], module: str | None) -> None:

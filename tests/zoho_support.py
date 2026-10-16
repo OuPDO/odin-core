@@ -44,7 +44,17 @@ CRM_TOOLS = {"zoho_crm_search", "zoho_crm_get", "zoho_crm_list", "zoho_crm_list_
 BOOKS_TOOLS = {
     "zoho_books_search_contacts", "zoho_books_get_contact",
     "zoho_books_list_estimates", "zoho_books_get_estimate",
+    "zoho_books_list_items", "zoho_books_list_taxes",
 }
+CRM_WRITE_TOOLS = {
+    "zoho_crm_create", "zoho_crm_update", "zoho_crm_add_note", "zoho_crm_create_task",
+}
+BOOKS_WRITE_TOOLS = {
+    "zoho_books_create_contact", "zoho_books_update_contact", "zoho_books_create_estimate",
+    "zoho_books_update_estimate", "zoho_books_mark_estimate", "zoho_books_create_item",
+}
+CRM_ALL = CRM_TOOLS | CRM_WRITE_TOOLS
+BOOKS_ALL = BOOKS_TOOLS | BOOKS_WRITE_TOOLS
 
 
 class TokenMock:

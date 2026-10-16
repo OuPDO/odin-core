@@ -14,9 +14,9 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from zoho_support import (
     API,
+    BOOKS_ALL,
     BOOKS_ORG_ID,
-    BOOKS_TOOLS,
-    CRM_TOOLS,
+    CRM_ALL,
     ENV_ADO,
     ENV_BOOKS,
     ENV_BOTH,
@@ -38,12 +38,12 @@ ROOT = Path(__file__).resolve().parent.parent
 COMBOS = [
     ("none", {}, set()),
     ("books-id-only", dict(ENV_BOOKS), set()),
-    ("om-only", dict(ENV_OM), CRM_TOOLS),
-    ("om-with-books", {**ENV_OM, **ENV_BOOKS}, CRM_TOOLS | BOOKS_TOOLS),
-    ("ado-only", dict(ENV_ADO), CRM_TOOLS),
-    ("ado-with-books-id", {**ENV_ADO, **ENV_BOOKS}, CRM_TOOLS),
-    ("both-no-books-id", {**ENV_OM, **ENV_ADO}, CRM_TOOLS),
-    ("both", dict(ENV_BOTH), CRM_TOOLS | BOOKS_TOOLS),
+    ("om-only", dict(ENV_OM), CRM_ALL),
+    ("om-with-books", {**ENV_OM, **ENV_BOOKS}, CRM_ALL | BOOKS_ALL),
+    ("ado-only", dict(ENV_ADO), CRM_ALL),
+    ("ado-with-books-id", {**ENV_ADO, **ENV_BOOKS}, CRM_ALL),
+    ("both-no-books-id", {**ENV_OM, **ENV_ADO}, CRM_ALL),
+    ("both", dict(ENV_BOTH), CRM_ALL | BOOKS_ALL),
 ]
 
 
@@ -104,7 +104,9 @@ async def test_tool_schemas_expose_enums_and_no_books_organization(router):
     assert set(search["org"]["enum"]) == {"om", "ado"}
     assert set(search["module"]["enum"]) == {"Leads", "Contacts", "Deals", "Accounts"}
     assert {"word", "email", "phone", "full_name"} <= set(search["by"]["enum"])
-    assert not [n for n, props in tools.items() if "fields" in props]
+    writers = ("zoho_crm_create", "zoho_crm_update", "zoho_books_create", "zoho_books_update")
+    assert not [n for n, props in tools.items()
+                if "fields" in props and not n.startswith(writers)]
     assert "enum" in tools["zoho_books_list_estimates"]["status"]["anyOf"][0]
 
 

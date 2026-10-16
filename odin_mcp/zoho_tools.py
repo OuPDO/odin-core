@@ -1,4 +1,4 @@
-"""MCP-Tools fuer Zoho CRM und Books. Nur lesend, keine Schreib-Operationen.
+"""MCP-Tools fuer Zoho CRM und Books: Lese-Tools hier, Schreib-Tools in zoho_write_tools.py.
 
 Die Tools werden nur fuer Orgs registriert, deren Credentials vollstaendig in der
 Umgebung stehen (ZOHO_OM_*, ZOHO_ADO_*; Books zusaetzlich ZOHO_BOOKS_ORGANIZATION_ID
@@ -18,6 +18,7 @@ from mcp.server.fastmcp import FastMCP
 from integrations.zoho import books, crm
 from integrations.zoho.client import ZohoClient
 from integrations.zoho.config import ZohoConfig
+from odin_mcp.zoho_write_tools import ZohoWriteTools
 
 log = logging.getLogger("odin.mcp.zoho")
 
@@ -139,6 +140,23 @@ class ZohoTools:
         """
         return await books.get_estimate(self._client, id)
 
+    async def books_list_items(self, page: int = 1) -> dict[str, Any]:
+        """Zoho-Books-Artikel auflisten (nur OM, nur lesend). Liefert {data, page, has_more_page}.
+
+        Pro Artikel nur: item_id, name, rate, description, unit, tax_id.
+
+        Args:
+            page: Seite 1 bis 100 (50 Treffer pro Seite).
+        """
+        return await books.list_items(self._client, page)
+
+    async def books_list_taxes(self) -> dict[str, Any]:
+        """Zoho-Books-Steuersaetze auflisten (nur OM, nur lesend). Liefert {data}.
+
+        Pro Steuersatz nur: tax_id, tax_name, tax_percentage.
+        """
+        return await books.list_taxes(self._client)
+
     def crm_tools(self) -> dict[str, Callable[..., Any]]:
         return {
             "zoho_crm_search": self.crm_search, "zoho_crm_get": self.crm_get,
@@ -151,11 +169,13 @@ class ZohoTools:
             "zoho_books_get_contact": self.books_get_contact,
             "zoho_books_list_estimates": self.books_list_estimates,
             "zoho_books_get_estimate": self.books_get_estimate,
+            "zoho_books_list_items": self.books_list_items,
+            "zoho_books_list_taxes": self.books_list_taxes,
         }
 
 
 def register_zoho_tools(mcp: FastMCP, env: Mapping[str, str] | None = None) -> list[str]:
-    """Registriert die Zoho-Lese-Tools nach vorhandenen Credentials. Gibt die Tool-Namen zurueck.
+    """Registriert die Zoho-Tools (lesen und schreiben) nach vorhandenen Credentials. Gibt die Tool-Namen zurueck.
 
     Ungueltige Konfiguration (z.B. fremder Host) registriert nichts und wirft nicht,
     damit odin-core trotzdem startet. Die Warnung nennt nie den konfigurierten Wert.
@@ -167,10 +187,12 @@ def register_zoho_tools(mcp: FastMCP, env: Mapping[str, str] | None = None) -> l
         return []
     if not config.crm_orgs:
         return []
-    tools = ZohoTools(ZohoClient(config))
-    selected = dict(tools.crm_tools())
+    client = ZohoClient(config)
+    tools, writers = ZohoTools(client), ZohoWriteTools(client)
+    selected = {**tools.crm_tools(), **writers.crm_tools()}
     if config.books_enabled:
         selected.update(tools.books_tools())
+        selected.update(writers.books_tools())
     for name, fn in selected.items():
         mcp.tool(name=name)(fn)
     log.info("Zoho-Tools registriert: orgs=%s books=%s", ",".join(config.crm_orgs),

@@ -15,6 +15,9 @@ ALLOWED_CODES = frozenset({
     "INVALID_DATA", "REQUIRED_PARAM_MISSING", "INVALID_URL_PATTERN", "LIMIT_REACHED",
     "INVALID_REQUEST", "INVALID_MODULE", "AUTHENTICATION_FAILURE", "TOO_MANY_REQUESTS",
     "INTERNAL_ERROR",
+    # per-record write results (CRM)
+    "SUCCESS", "DUPLICATE_DATA", "MANDATORY_NOT_FOUND", "NOT_ALLOWED", "NOT_SUPPORTED",
+    "CANNOT_PROCESS", "PATTERN_NOT_MATCHED", "MAXIMUM_LENGTH_EXCEEDED",
     # OAuth token endpoint
     "invalid_client", "invalid_code", "invalid_request", "invalid_grant", "access_denied",
 })

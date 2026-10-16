@@ -1,7 +1,7 @@
-"""Zoho Books v3 read operations: contacts and estimates, org `om` only.
+"""Zoho Books v3 read operations: contacts, estimates, items and taxes, org `om` only.
 
 The Books organization id comes from the environment (inside the client); there is
-deliberately no parameter for it. No items, taxes, settings or write operations.
+deliberately no parameter for it. Writes live in books_write.py.
 
 Data minimisation (the data goes to an external agent): contact and estimate objects are
 reduced to a fixed key allowlist; estimate line items to name, description, quantity,
@@ -26,6 +26,8 @@ CONTACT_KEYS = ("contact_id", "contact_name", "company_name", "email", "phone", 
                 "outstanding_receivable_amount", "currency_code")
 ESTIMATE_KEYS = ("estimate_id", "estimate_number", "date", "expiry_date", "status",
                  "customer_id", "customer_name", "total", "currency_code", "reference_number")
+ITEM_KEYS = ("item_id", "name", "rate", "description", "unit", "tax_id")
+TAX_KEYS = ("tax_id", "tax_name", "tax_percentage")
 LINE_ITEM_KEYS = ("name", "description", "quantity", "rate", "item_total")
 
 
@@ -85,3 +87,14 @@ async def list_estimates(client: ZohoClient, status: str | None = None,
 async def get_estimate(client: ZohoClient, estimate_id: str) -> dict:
     raw = await client.get(BOOKS_ORG, f"/books/v3/estimates/{validate_id(estimate_id)}")
     return _single(raw, "estimate", _estimate)
+
+
+async def list_items(client: ZohoClient, page: int = 1) -> dict:
+    params = {"page": validate_page(page, BOOKS_MAX_PAGE), "per_page": PER_PAGE}
+    raw = await client.get(BOOKS_ORG, "/books/v3/items", params)
+    return _listing(raw, "items", params["page"], lambda item: _pick(item, ITEM_KEYS))
+
+
+async def list_taxes(client: ZohoClient) -> dict:
+    raw = await client.get(BOOKS_ORG, "/books/v3/settings/taxes")
+    return {"data": [_pick(tax, TAX_KEYS) for tax in list_of_dicts(raw or {}, "taxes")]}
