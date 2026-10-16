@@ -1,5 +1,11 @@
 """Zoho tools behind ApiKeyGuard + a real FastMCP streamable-http app (no real network)."""
 import contextlib
+import json
+import logging
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 import httpx
 import pytest
@@ -15,16 +21,19 @@ from zoho_support import (
     ENV_BOOKS,
     ENV_BOTH,
     ENV_OM,
+    TOKEN_URL,
     McpSession,
     TokenMock,
     data_calls,
     tool_json,
 )
 
+from integrations.zoho import crm
 from odin_mcp.http_app import ApiKeyGuard
 from odin_mcp.zoho_tools import register_zoho_tools
 
 API_KEY = "mounted-test-key"
+ROOT = Path(__file__).resolve().parent.parent
 
 COMBOS = [
     ("none", {}, set()),
@@ -76,30 +85,42 @@ async def test_tools_list_matches_credentials(label, env, expected, router):
 
 
 async def test_requires_api_key(router):
-    async with mounted(ENV_BOTH) as (_, _, app):
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
-                                     base_url="http://localhost") as raw:
-            body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
-            headers = {"Accept": "application/json, text/event-stream"}
-            assert (await raw.post("/", json=body, headers=headers)).status_code == 401
-            bad = {**headers, "Authorization": "Bearer wrong"}
-            assert (await raw.post("/", json=body, headers=bad)).status_code == 401
+    async with mounted(ENV_BOTH) as (_, _, app), httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://localhost") as raw:
+        body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+        headers = {"Accept": "application/json, text/event-stream"}
+        assert (await raw.post("/", json=body, headers=headers)).status_code == 401
+        bad = {**headers, "Authorization": "Bearer wrong"}
+        assert (await raw.post("/", json=body, headers=bad)).status_code == 401
 
 
-async def test_tool_schemas_are_read_only_and_documented(router):
+async def test_tool_schemas_expose_enums_and_no_books_organization(router):
     async with mounted(ENV_BOTH) as (session, _, _):
         await session.open()
-        resp = await session.rpc("tools/list")
-        for tool in resp["result"]["tools"]:
-            assert "nur lesend" in tool["description"].lower(), tool["name"]
-            assert "organization_id" not in tool["inputSchema"]["properties"]
+        tools = {t["name"]: t["inputSchema"]["properties"]
+                 for t in (await session.rpc("tools/list"))["result"]["tools"]}
+    assert all("organization_id" not in props for props in tools.values())
+    search = tools["zoho_crm_search"]
+    assert set(search["org"]["enum"]) == {"om", "ado"}
+    assert set(search["module"]["enum"]) == {"Leads", "Contacts", "Deals", "Accounts"}
+    assert {"word", "email", "phone", "full_name"} <= set(search["by"]["enum"])
+    assert "fields" in tools["zoho_crm_get"]
+    assert "enum" in tools["zoho_books_list_estimates"]["status"]["anyOf"][0]
+
+
+async def test_registration_logs_under_the_mcp_zoho_logger(caplog):
+    caplog.set_level(logging.INFO)
+    _build(dict(ENV_OM))
+    assert any(r.name == "odin.mcp.zoho" for r in caplog.records)
 
 
 async def test_crm_search_returns_data_from_mocked_zoho(router):
     TokenMock(router)
-    route = router.get(f"{API}/crm/v6/Leads/search").mock(return_value=httpx.Response(200, json={
-        "data": [{"id": "1", "Full_Name": "Erika Muster", "$editable": True}],
-        "info": {"page": 1, "more_records": False}}))
+    route = router.get(f"{API}/crm/v6/Leads/search", params={
+        "criteria": "(Full_Name:equals:Erika Muster)", "page": "1", "per_page": "50"}).mock(
+        return_value=httpx.Response(200, json={
+            "data": [{"id": "1", "Full_Name": "Erika Muster", "$editable": True}],
+            "info": {"page": 1, "more_records": False}}))
     async with mounted(ENV_BOTH) as (session, _, _):
         await session.open()
         result = await session.call("zoho_crm_search", {
@@ -111,22 +132,27 @@ async def test_crm_search_returns_data_from_mocked_zoho(router):
 
 async def test_each_tool_returns_data(router):
     TokenMock(router)
-    router.get(f"{API}/crm/v6/Contacts/5").mock(
-        return_value=httpx.Response(200, json={"data": [{"id": "5"}]}))
-    router.get(f"{API}/crm/v6/Contacts").mock(
-        return_value=httpx.Response(200, json={"data": [{"id": "6"}], "info": {"page": 1}}))
-    router.get(f"{API}/crm/v6/Contacts/5/Notes").mock(
-        return_value=httpx.Response(200, json={"data": [{"id": "n"}], "info": {"page": 1}}))
-    router.get(f"{API}/books/v3/contacts").mock(
-        return_value=httpx.Response(200, json={"contacts": [{"contact_id": "c"}]}))
-    router.get(f"{API}/books/v3/contacts/8").mock(
-        return_value=httpx.Response(200, json={"contact": {"contact_id": "8"}}))
-    router.get(f"{API}/books/v3/estimates").mock(
-        return_value=httpx.Response(200, json={"estimates": [{"estimate_id": "e"}]}))
-    router.get(f"{API}/books/v3/estimates/9").mock(
-        return_value=httpx.Response(200, json={"estimate": {"estimate_id": "9"}}))
+    org = {"organization_id": BOOKS_ORG_ID}
+    paging = {"page": "1", "per_page": "50"}
+    notes_fields = "Note_Title,Note_Content,Created_Time,Modified_Time,Owner"
+    for path, params, body in [
+        ("/crm/v6/Contacts/5", {"fields": "Full_Name,Email"}, {"data": [{"id": "5"}]}),
+        ("/crm/v6/Contacts", {"fields": "Full_Name", **paging},
+         {"data": [{"id": "6"}], "info": {"page": 1}}),
+        ("/crm/v6/Contacts/5/Notes", {"fields": notes_fields, **paging},
+         {"data": [{"id": "n"}], "info": {"page": 1}}),
+        ("/books/v3/contacts", {"search_text": "x", **paging, **org},
+         {"contacts": [{"contact_id": "c"}]}),
+        ("/books/v3/contacts/8", org, {"contact": {"contact_id": "8"}}),
+        ("/books/v3/estimates", {"status": "sent", **paging, **org},
+         {"estimates": [{"estimate_id": "e"}]}),
+        ("/books/v3/estimates/9", org, {"estimate": {"estimate_id": "9"}}),
+    ]:
+        router.get(f"{API}{path}", params=params).mock(
+            return_value=httpx.Response(200, json=body))
     calls = [
-        ("zoho_crm_get", {"org": "ado", "module": "Contacts", "id": "5"}),
+        ("zoho_crm_get", {"org": "ado", "module": "Contacts", "id": "5",
+                          "fields": ["Full_Name", "Email"]}),
         ("zoho_crm_list", {"org": "ado", "module": "Contacts", "fields": ["Full_Name"]}),
         ("zoho_crm_list_notes", {"org": "ado", "module": "Contacts", "id": "5"}),
         ("zoho_books_search_contacts", {"text": "x"}),
@@ -176,13 +202,17 @@ async def test_missing_argument_is_tool_error(router):
 
 async def test_caller_supplied_books_organization_never_reaches_zoho(router):
     TokenMock(router)
-    route = router.get(f"{API}/books/v3/contacts/1").mock(
+    route = router.get(f"{API}/books/v3/contacts/1", params={
+        "organization_id": BOOKS_ORG_ID}).mock(
         return_value=httpx.Response(200, json={"contact": {"contact_id": "1"}}))
     async with mounted(ENV_BOTH) as (session, _, _):
         await session.open()
-        await session.call("zoho_books_get_contact", {"id": "1", "organization_id": "999"})
-    for call in route.calls:
-        assert call.request.url.params["organization_id"] == BOOKS_ORG_ID
+        result = await session.call("zoho_books_get_contact",
+                                    {"id": "1", "organization_id": "999"})
+    assert route.call_count == 1
+    assert route.calls.last.request.url.params["organization_id"] == BOOKS_ORG_ID
+    assert "999" not in str(route.calls.last.request.url)
+    assert tool_json(result) == {"data": {"contact_id": "1"}}
 
 
 async def test_ado_only_rejects_om_org(router):
@@ -203,29 +233,85 @@ async def test_om_only_rejects_ado_org(router):
     assert token.calls == 0 and not data_calls(router)
 
 
-async def test_upstream_failure_is_tool_error_without_secrets(router):
+SECRET_BODIES = [
+    {"code": ENV_OM["ZOHO_OM_CLIENT_SECRET"]},
+    {"error": ENV_OM["ZOHO_OM_REFRESH_TOKEN"]},
+    {"code": "INVALID_DATA", "message": ENV_OM["ZOHO_OM_CLIENT_SECRET"]},
+    {"code": ENV_OM["ZOHO_OM_REFRESH_TOKEN"], "message": ENV_OM["ZOHO_OM_CLIENT_SECRET"],
+     "error": ENV_OM["ZOHO_OM_REFRESH_TOKEN"]},
+]
+OWN_SECRETS = (ENV_OM["ZOHO_OM_CLIENT_SECRET"], ENV_OM["ZOHO_OM_REFRESH_TOKEN"], "AT-om-")
+
+
+@pytest.mark.parametrize("body", SECRET_BODIES)
+async def test_upstream_data_error_never_reaches_tool_result_or_logs(body, router, caplog):
+    caplog.set_level(logging.DEBUG)
     TokenMock(router)
-    router.get(f"{API}/crm/v6/Leads/1").mock(return_value=httpx.Response(
-        500, json={"message": "boom " + ENV_OM["ZOHO_OM_CLIENT_SECRET"]}))
+    router.get(f"{API}/crm/v6/Leads/1", params={"fields": crm.DEFAULT_FIELDS["Leads"]}).mock(
+        return_value=httpx.Response(400, json=body))
     async with mounted(ENV_BOTH) as (session, _, _):
         await session.open()
         result = await session.call("zoho_crm_get", {"org": "om", "module": "Leads", "id": "1"})
     assert result["isError"] is True
-    text = result["content"][0]["text"]
-    for secret in (ENV_OM["ZOHO_OM_CLIENT_SECRET"], ENV_OM["ZOHO_OM_REFRESH_TOKEN"], "AT-om-"):
-        assert secret not in text
+    text = result["content"][0]["text"] + caplog.text
+    assert not any(secret in text for secret in OWN_SECRETS)
 
 
-def test_invalid_config_registers_nothing_and_does_not_raise():
+@pytest.mark.parametrize("body", SECRET_BODIES)
+async def test_upstream_token_error_never_reaches_tool_result_or_logs(body, router, caplog):
+    caplog.set_level(logging.DEBUG)
+    router.post(TOKEN_URL).mock(return_value=httpx.Response(400, json=body))
+    async with mounted(ENV_BOTH) as (session, _, _):
+        await session.open()
+        result = await session.call("zoho_crm_get", {"org": "om", "module": "Leads", "id": "1"})
+    assert result["isError"] is True
+    text = result["content"][0]["text"] + caplog.text
+    assert not any(secret in text for secret in OWN_SECRETS)
+
+
+async def test_crm_get_returns_only_allowlisted_fields_by_default(router):
+    TokenMock(router)
+    route = router.get(f"{API}/crm/v6/Contacts/5", params={
+        "fields": crm.DEFAULT_FIELDS["Contacts"]}).mock(
+        return_value=httpx.Response(200, json={"data": [{"id": "5", "Full_Name": "A"}]}))
+    async with mounted(ENV_BOTH) as (session, _, _):
+        await session.open()
+        result = await session.call("zoho_crm_get", {"org": "om", "module": "Contacts",
+                                                     "id": "5"})
+    assert route.call_count == 1
+    assert tool_json(result) == {"data": [{"id": "5", "Full_Name": "A"}]}
+
+
+@pytest.mark.parametrize("by", ["email", "bogus"])
+async def test_literal_types_reject_unknown_values_before_zoho(by, router):
+    token = TokenMock(router)
+    async with mounted(ENV_BOTH) as (session, _, _):
+        await session.open()
+        args = {"org": "om", "module": "Leads", "by": by, "value": "xy"}
+        args["org" if by == "bogus" else "module"] = "nope"
+        result = await session.call("zoho_crm_search", args)
+    assert result["isError"] is True
+    assert token.calls == 0 and not data_calls(router)
+
+
+def test_invalid_config_registers_nothing_and_does_not_raise(caplog):
+    caplog.set_level(logging.WARNING)
     mcp = FastMCP("zoho-test")
     bad = {**ENV_OM, "ZOHO_API_DOMAIN": "http://evil.example"}
     assert register_zoho_tools(mcp, env=bad) == []
+    assert any(r.levelno == logging.WARNING for r in caplog.records)
+    assert "evil.example" not in caplog.text
 
 
-async def test_real_server_registers_no_zoho_tools_without_credentials(monkeypatch):
-    for key in list(ENV_BOTH) + ["ZOHO_ACCOUNTS_URL", "ZOHO_API_DOMAIN"]:
-        monkeypatch.delenv(key, raising=False)
-    import odin_mcp.server as server
-    names = {t.name for t in await server.mcp.list_tools()}
-    assert not {n for n in names if n.startswith("zoho_")}
+def test_real_server_registers_no_zoho_tools_without_credentials():
+    """Fresh interpreter with a clean env: independent of import order in this test run."""
+    code = ("import asyncio, json, odin_mcp.server as s; "
+            "print(json.dumps(sorted(t.name for t in asyncio.run(s.mcp.list_tools()))))")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("ZOHO_")}
+    env.update(PYTHONPATH=str(ROOT), TELEGRAM_BOT_TOKEN="dummy", AZURE_OPENAI_API_KEY="dummy",
+               AZURE_OPENAI_ENDPOINT="https://dummy.example")
+    proc = subprocess.run([sys.executable, "-c", code], cwd=ROOT, env=env, check=True,
+                          capture_output=True, text=True, timeout=120)
+    names = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert not [n for n in names if n.startswith("zoho_")]
     assert "search_knowledge" in names

@@ -3,7 +3,9 @@
 Everything here is fake: credentials are made-up strings, Zoho is mocked via respx,
 nothing leaves the process.
 """
+import asyncio
 import json
+import time
 from urllib.parse import parse_qs
 
 import httpx
@@ -41,24 +43,46 @@ BOOKS_TOOLS = {
 
 
 class TokenMock:
-    """Token endpoint: access token is 'AT-<org>-<n>', derived from the refresh token."""
+    """Token endpoint: access token is 'AT-<org>-<n>', derived from the refresh token.
 
-    def __init__(self, router):
+    `delay` makes the handler yield to the event loop so concurrent callers really overlap.
+    """
+
+    def __init__(self, router, *, delay: float = 0.0, expires_in=3600):
         self.minted: list[str] = []
         self.bodies: list[dict] = []
+        self._delay = delay
+        self._expires_in = expires_in
         self.route = router.post(TOKEN_URL).mock(side_effect=self._handle)
 
-    def _handle(self, request):
+    async def _handle(self, request):
+        if self._delay:
+            await asyncio.sleep(self._delay)
         body = {k: v[0] for k, v in parse_qs(request.content.decode()).items()}
         self.bodies.append(body)
         org = "om" if "om-refresh" in body.get("refresh_token", "") else "ado"
         token = f"AT-{org}-{len(self.minted) + 1}"
         self.minted.append(token)
-        return httpx.Response(200, json={"access_token": token, "expires_in": 3600})
+        payload = {"access_token": token}
+        if self._expires_in is not None:
+            payload["expires_in"] = self._expires_in
+        return httpx.Response(200, json=payload)
 
     @property
     def calls(self) -> int:
         return self.route.call_count
+
+
+class FakeClock:
+    """time.monotonic shifted by an offset the test advances (real time keeps flowing)."""
+
+    def __init__(self, monkeypatch):
+        real = time.monotonic
+        self.offset = 0.0
+        monkeypatch.setattr(time, "monotonic", lambda: real() + self.offset)
+
+    def advance(self, seconds: float) -> None:
+        self.offset += seconds
 
 
 def data_calls(router) -> list:

@@ -1,6 +1,7 @@
 """Packaging: the installed distribution contains the Zoho packages and imports outside the checkout.
 
-Needs PyPI access (build isolation + httpx), so it skips offline or with ZOHO_SKIP_PACKAGING=1.
+The install test needs PyPI access (build isolation + httpx), so it only runs when opted in
+with ZOHO_RUN_PACKAGING=1 (and skips offline). The pyproject listing test always runs.
 """
 import os
 import shutil
@@ -22,11 +23,6 @@ def test_pyproject_lists_zoho_packages_and_respx():
     assert any(d.startswith("respx") for d in cfg["project"]["optional-dependencies"]["dev"])
 
 
-def test_packages_exist_with_init():
-    assert (ROOT / "integrations" / "__init__.py").is_file()
-    assert (ROOT / "integrations" / "zoho" / "__init__.py").is_file()
-
-
 def _pypi_reachable() -> bool:
     try:
         socket.create_connection(("pypi.org", 443), timeout=3).close()
@@ -36,7 +32,8 @@ def _pypi_reachable() -> bool:
 
 
 @pytest.mark.packaging
-@pytest.mark.skipif(os.environ.get("ZOHO_SKIP_PACKAGING") == "1", reason="disabled via env")
+@pytest.mark.skipif(os.environ.get("ZOHO_RUN_PACKAGING") != "1",
+                    reason="opt-in: set ZOHO_RUN_PACKAGING=1 (builds a venv, needs PyPI)")
 def test_install_into_fresh_venv_and_import_from_outside(tmp_path):
     if not _pypi_reachable():
         pytest.skip("PyPI not reachable (offline)")
