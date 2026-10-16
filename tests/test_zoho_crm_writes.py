@@ -133,14 +133,31 @@ async def test_per_record_error_is_reported_with_safe_code_and_field(client, rou
     assert route.call_count == 1  # a confirmed rejection is never retried
 
 
-async def test_unknown_upstream_values_are_neutralised(client, router):
+async def test_unknown_error_code_and_bad_field_are_neutralised(client, router):
     TokenMock(router)
-    router.post(f"{API}/crm/v6/Leads").mock(return_value=httpx.Response(201, json={"data": [
-        {"code": "whatever<script>", "status": "weird",
+    router.post(f"{API}/crm/v6/Leads").mock(return_value=httpx.Response(400, json={"data": [
+        {"code": "whatever<script>", "status": "error",
          "details": {"id": "not-digits", "api_name": "bad key!"}}]}))
     result = await writes.create(client, "om", "Leads", {"Last_Name": "x"})
     assert result == {"ok": False, "results": [
-        {"id": None, "status": "unknown", "code": "upstream_error"}]}
+        {"id": None, "status": "error", "code": "upstream_error"}]}
+
+
+@pytest.mark.parametrize("raw", [
+    {"data": [{}]},  # review reproduction 1
+    {"data": [{"status": "success"}]},  # review reproduction 2
+    {"data": [{"status": "weird", "code": "SUCCESS", "details": {"id": "1"}}]},
+    {"data": [{"status": "success", "code": "SUCCESS"}]},
+    {"data": [{"status": "success", "code": "SUCCESS", "details": {"id": "x"}}]},
+    {"data": [{"status": "error"}]},
+    {"data": [{"status": "success", "code": "SUCCESS", "details": {"id": "1"}}, {}]},
+])
+async def test_incomplete_individual_result_is_outcome_unknown(raw, client, router):
+    TokenMock(router)
+    route = router.post(f"{API}/crm/v6/Leads").mock(return_value=httpx.Response(201, json=raw))
+    with pytest.raises(ZohoOutcomeUnknown):
+        await writes.create(client, "om", "Leads", {"Last_Name": "x"})
+    assert route.call_count == 1
 
 
 async def test_http_error_becomes_sanitized_api_error(client, router):

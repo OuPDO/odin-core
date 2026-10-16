@@ -40,12 +40,15 @@ def _module(value: Any) -> str:
 
 
 def _result(item: dict) -> dict:
+    """One record result. An entry without status or code, or a success without its id, is
+    incomplete: the write ran but we cannot tell what it produced (outcome unknown)."""
     details = dict_or_none(item, "details") or {}
-    status = item.get("status")
-    out: dict[str, Any] = {
-        "id": details["id"] if is_id(details.get("id")) else None,
-        "status": status if status in _STATUSES else "unknown",
-        "code": safe_code(item.get("code"))}
+    status, code = item.get("status"), item.get("code")
+    record_id = details["id"] if is_id(details.get("id")) else None
+    if status not in _STATUSES or not isinstance(code, str) or (
+            status == "success" and record_id is None):
+        raise ZohoOutcomeUnknown("incomplete per-record result")
+    out: dict[str, Any] = {"id": record_id, "status": status, "code": safe_code(code)}
     field = details.get("api_name")
     if isinstance(field, str) and _FIELD_NAME_RE.fullmatch(field):
         out["field"] = field

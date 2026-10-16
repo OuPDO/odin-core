@@ -39,7 +39,7 @@ def _project(raw: dict | None, entity: str | None, keys: tuple[str, ...]) -> dic
         item = dict_or_none(raw, entity) if entity else None
     except ZohoAPIError:
         raise ZohoOutcomeUnknown("unexpected response shape") from None
-    if entity and code == 0 and item is None:
+    if entity and code == 0 and (item is None or not item.get(keys[0])):
         raise ZohoOutcomeUnknown("no result entity")
     out: dict[str, Any] = {"ok": code == 0, "code": code,
                            "data": None if item is None else {k: item[k] for k in keys

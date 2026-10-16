@@ -273,3 +273,20 @@ async def test_books_unusable_code_is_outcome_unknown(code, client, router):
         201, json={"code": code, "item": {"item_id": "1"}}))
     with pytest.raises(ZohoOutcomeUnknown):
         await books_write.create_item(client, {"name": "x"})
+
+
+@pytest.mark.parametrize("entity,call", [
+    ("item", lambda c: books_write.create_item(c, {"name": "x"})),  # review reproduction 3
+    ("contact", lambda c: books_write.create_contact(c, {"contact_name": "x"})),
+    ("estimate", lambda c: books_write.create_estimate(c, {"customer_id": "1"})),
+])
+@pytest.mark.parametrize("body", [{}, {"name": "x", "status": "active"}])
+async def test_books_success_without_entity_id_is_outcome_unknown(entity, call, body, client,
+                                                                  router):
+    TokenMock(router)
+    path = {"item": "items", "contact": "contacts", "estimate": "estimates"}[entity]
+    route = router.post(f"{API}/books/v3/{path}").mock(return_value=httpx.Response(
+        201, json={"code": 0, entity: body}))
+    with pytest.raises(ZohoOutcomeUnknown):
+        await call(client)
+    assert route.call_count == 1
