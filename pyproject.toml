@@ -31,7 +31,9 @@ dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.24.0",
     "ruff>=0.6.0",
+    "respx>=0.21.0",
+    "pytest-cov>=5.0.0",
 ]
 
 [tool.setuptools]
-packages = ["agents", "config", "knowledge", "memory", "odin_mcp", "scripts", "telegram_bot", "tools"]
+packages = ["agents", "config", "integrations", "integrations.zoho", "knowledge", "memory", "odin_mcp", "scripts", "telegram_bot", "tools"]
