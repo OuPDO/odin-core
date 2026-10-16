@@ -16,6 +16,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
 from odin_mcp import tools
+from odin_mcp.zoho_tools import register_zoho_tools
 
 # DNS-Rebinding-Schutz bleibt AN; hinter Traefik kommt der oeffentliche Host an,
 # der explizit erlaubt werden muss (sonst 421 "Invalid Host header").
@@ -41,6 +42,9 @@ mcp = FastMCP(
 for _fn in (tools.search_knowledge, tools.remember, tools.update_memory, tools.recall_about,
             tools.wisdom_gegencheck, tools.wisdom_search):
     mcp.tool()(_fn)
+
+# Zoho-Lese-Tools nur fuer Orgs mit vollstaendigen Credentials (sonst keine Registrierung).
+register_zoho_tools(mcp)
 
 
 def main() -> None:

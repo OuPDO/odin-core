@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Response
 
 from config import settings
+from integrations.zoho.httpio import silence_http_loggers
 from odin_mcp.http_app import ApiKeyGuard
 from odin_mcp.server import mcp
 
@@ -13,6 +14,8 @@ logging.basicConfig(
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
 )
 logger = logging.getLogger("odin")
+# httpx logs full request URLs at INFO; Zoho search values (PII) travel in the query string.
+silence_http_loggers()
 
 # Sub-App einmal beim Import bauen -> danach existiert mcp.session_manager,
 # das in der Host-Lifespan gestartet werden MUSS (sonst 500 "task group not
