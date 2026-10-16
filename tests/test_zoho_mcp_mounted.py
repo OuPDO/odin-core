@@ -104,7 +104,7 @@ async def test_tool_schemas_expose_enums_and_no_books_organization(router):
     assert set(search["org"]["enum"]) == {"om", "ado"}
     assert set(search["module"]["enum"]) == {"Leads", "Contacts", "Deals", "Accounts"}
     assert {"word", "email", "phone", "full_name"} <= set(search["by"]["enum"])
-    assert "fields" in tools["zoho_crm_get"]
+    assert not [n for n, props in tools.items() if "fields" in props]
     assert "enum" in tools["zoho_books_list_estimates"]["status"]["anyOf"][0]
 
 
@@ -136,8 +136,8 @@ async def test_each_tool_returns_data(router):
     paging = {"page": "1", "per_page": "50"}
     notes_fields = "Note_Title,Note_Content,Created_Time,Modified_Time,Owner"
     for path, params, body in [
-        ("/crm/v6/Contacts/5", {"fields": "Full_Name,Email"}, {"data": [{"id": "5"}]}),
-        ("/crm/v6/Contacts", {"fields": "Full_Name", **paging},
+        ("/crm/v6/Contacts/5", {"fields": crm.DEFAULT_FIELDS["Contacts"]}, {"data": [{"id": "5"}]}),
+        ("/crm/v6/Contacts", {"fields": crm.DEFAULT_FIELDS["Contacts"], **paging},
          {"data": [{"id": "6"}], "info": {"page": 1}}),
         ("/crm/v6/Contacts/5/Notes", {"fields": notes_fields, **paging},
          {"data": [{"id": "n"}], "info": {"page": 1}}),
@@ -151,9 +151,8 @@ async def test_each_tool_returns_data(router):
         router.get(f"{API}{path}", params=params).mock(
             return_value=httpx.Response(200, json=body))
     calls = [
-        ("zoho_crm_get", {"org": "ado", "module": "Contacts", "id": "5",
-                          "fields": ["Full_Name", "Email"]}),
-        ("zoho_crm_list", {"org": "ado", "module": "Contacts", "fields": ["Full_Name"]}),
+        ("zoho_crm_get", {"org": "ado", "module": "Contacts", "id": "5"}),
+        ("zoho_crm_list", {"org": "ado", "module": "Contacts"}),
         ("zoho_crm_list_notes", {"org": "ado", "module": "Contacts", "id": "5"}),
         ("zoho_books_search_contacts", {"text": "x"}),
         ("zoho_books_get_contact", {"id": "8"}),
@@ -175,7 +174,6 @@ async def test_each_tool_returns_data(router):
     ("zoho_crm_get", {"org": "evil", "module": "Leads", "id": "1"}),
     ("zoho_crm_search", {"org": "om", "module": "Leads", "by": "account", "value": "x"}),
     ("zoho_crm_search", {"org": "om", "module": "Leads", "by": "word", "value": "x", "page": 99}),
-    ("zoho_crm_list", {"org": "om", "module": "Leads", "fields": ["a,b"]}),
     ("zoho_crm_list_notes", {"org": "om", "module": "Leads", "id": "%2F"}),
     ("zoho_books_get_contact", {"id": "1?x=1"}),
     ("zoho_books_list_estimates", {"status": "x&y=1"}),
@@ -280,6 +278,63 @@ async def test_crm_get_returns_only_allowlisted_fields_by_default(router):
                                                      "id": "5"})
     assert route.call_count == 1
     assert tool_json(result) == {"data": [{"id": "5", "Full_Name": "A"}]}
+
+
+UPSTREAM_RECORD = {
+    "id": "5", "Full_Name": "Max Muster", "Email": "max@example.com",
+    "Description": "SECRET-DESCRIPTION", "Custom_Field__c": "SECRET-CUSTOM",
+    "Created_By": {"name": "Eve", "id": "77", "email": "eve@example.com"},
+    "Owner": {"name": "David", "id": "99", "email": "owner@example.com"},
+    "Account_Name": {"name": "Acme", "id": "55"}, "$approval": {"delegate": False},
+    "Tag": [{"name": "SECRET-TAG"}], "Mailing_Street": "SECRET-STREET",
+}
+FORBIDDEN_TEXT = ("SECRET", "eve@example.com", "owner@example.com", "$approval", '"77"', '"99"')
+UPSTREAM_NOTE = {
+    "id": "n1", "Note_Title": "T", "Note_Content": "C", "Created_Time": "c",
+    "Modified_Time": "m", "Owner": {"name": "David", "id": "99", "email": "owner@example.com"},
+    "Created_By": {"name": "Eve", "email": "eve@example.com"}, "$editable": True,
+    "Parent_Id": {"id": "SECRET-PARENT"},
+}
+
+
+async def _call_all_crm_tools(router) -> dict[str, str]:
+    TokenMock(router)
+    paging = {"page": "1", "per_page": "50"}
+    fields = crm.DEFAULT_FIELDS["Contacts"]
+    body = {"data": [UPSTREAM_RECORD], "info": {"page": 1}}
+    router.get(f"{API}/crm/v6/Contacts/5", params={"fields": fields}).mock(
+        return_value=httpx.Response(200, json=body))
+    router.get(f"{API}/crm/v6/Contacts", params={"fields": fields, **paging}).mock(
+        return_value=httpx.Response(200, json=body))
+    router.get(f"{API}/crm/v6/Contacts/search", params={"word": "max", **paging}).mock(
+        return_value=httpx.Response(200, json=body))
+    router.get(f"{API}/crm/v6/Contacts/5/Notes", params={
+        "fields": "Note_Title,Note_Content,Created_Time,Modified_Time,Owner", **paging}).mock(
+        return_value=httpx.Response(200, json={"data": [UPSTREAM_NOTE], "info": {"page": 1}}))
+    base = {"org": "om", "module": "Contacts"}
+    out = {}
+    async with mounted(ENV_BOTH) as (session, _, _):
+        await session.open()
+        for name, args in [("zoho_crm_get", {**base, "id": "5"}), ("zoho_crm_list", base),
+                           ("zoho_crm_search", {**base, "by": "word", "value": "max"}),
+                           ("zoho_crm_list_notes", {**base, "id": "5"})]:
+            result = await session.call(name, args)
+            assert not result.get("isError"), (name, result)
+            out[name] = result["content"][0]["text"]
+    return out
+
+
+async def test_crm_tool_results_never_contain_forbidden_upstream_fields(router):
+    texts = await _call_all_crm_tools(router)
+    for name, text in texts.items():
+        assert not any(bad in text for bad in FORBIDDEN_TEXT), (name, text)
+    for name in ("zoho_crm_get", "zoho_crm_list", "zoho_crm_search"):
+        record = tool_json({"content": [{"text": texts[name]}]})["data"][0]
+        assert record == {"id": "5", "Full_Name": "Max Muster", "Email": "max@example.com",
+                          "Owner": {"name": "David"}, "Account_Name": {"name": "Acme"}}
+    note = tool_json({"content": [{"text": texts["zoho_crm_list_notes"]}]})["data"][0]
+    assert note == {"id": "n1", "Note_Title": "T", "Note_Content": "C", "Created_Time": "c",
+                    "Modified_Time": "m", "Owner": {"name": "David"}}
 
 
 @pytest.mark.parametrize("by", ["email", "bogus"])

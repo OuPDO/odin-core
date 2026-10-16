@@ -51,34 +51,31 @@ class ZohoTools:
         """
         return await crm.search(self._client, org, module, by, value, page)
 
-    async def crm_get(self, org: Org, module: Module, id: str,
-                      fields: list[str] | None = None) -> dict[str, Any]:
+    async def crm_get(self, org: Org, module: Module, id: str) -> dict[str, Any]:
         """Einen Zoho-CRM-Datensatz per ID holen (nur lesend). Liefert {data}.
 
-        Ohne fields kommen nur die Standardfelder des Moduls (Datensparsamkeit). Weitere
-        Felder nur gezielt per fields anfordern.
+        Es kommen nur die festen Standardfelder des Moduls (Datensparsamkeit, nicht
+        waehlbar); Besitzer und Verknuepfungen nur als Name.
 
         Args:
             org: om oder ado.
             module: Leads, Contacts, Deals oder Accounts.
             id: Datensatz-ID, nur Ziffern.
-            fields: Optional Feld-API-Namen (max. 50, nur Buchstaben, Ziffern, Unterstrich).
         """
-        return await crm.get_record(self._client, org, module, id, fields)
+        return await crm.get_record(self._client, org, module, id)
 
-    async def crm_list(self, org: Org, module: Module, fields: list[str] | None = None,
-                       page: int = 1) -> dict[str, Any]:
+    async def crm_list(self, org: Org, module: Module, page: int = 1) -> dict[str, Any]:
         """Datensaetze eines Zoho-CRM-Moduls auflisten (nur lesend).
 
-        Liefert {data, page, more_records}.
+        Liefert {data, page, more_records}. Nur die festen Standardfelder des Moduls
+        (nicht waehlbar); Besitzer und Verknuepfungen nur als Name.
 
         Args:
             org: om oder ado.
             module: Leads, Contacts, Deals oder Accounts.
-            fields: Feld-API-Namen (max. 50); leer = Standardfelder des Moduls (Datensparsamkeit).
             page: Seite 1 bis 40 (50 Datensaetze pro Seite).
         """
-        return await crm.list_records(self._client, org, module, fields, page)
+        return await crm.list_records(self._client, org, module, page)
 
     async def crm_list_notes(self, org: Org, module: Module, id: str,
                              page: int = 1) -> dict[str, Any]:

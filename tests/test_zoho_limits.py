@@ -10,7 +10,15 @@ from pathlib import Path
 import httpx
 import pytest
 import respx
-from zoho_support import API, ENV_BOTH, ENV_OM, SECRETS, TOKEN_URL, TokenMock
+from zoho_support import (
+    API,
+    ENV_BOTH,
+    ENV_OM,
+    LEAD_PARAMS,
+    SECRETS,
+    TOKEN_URL,
+    TokenMock,
+)
 
 import integrations.zoho.client as client_mod
 from integrations.zoho import crm
@@ -18,7 +26,7 @@ from integrations.zoho.client import ZohoAPIError, ZohoClient, ZohoConfig
 
 ROOT = Path(__file__).resolve().parent.parent
 LEAD = f"{API}/crm/v6/Leads/123"
-PARAMS = {"fields": "Full_Name"}
+PARAMS = LEAD_PARAMS
 MAX_BYTES = 5 * 1024 * 1024
 CHUNK = 1024 * 1024
 
@@ -151,10 +159,10 @@ async def test_malformed_token_response_is_a_clean_error(payload, client, router
 async def test_unexpected_data_shape_is_a_clean_error(client, router):
     TokenMock(router)
     router.get(f"{API}/crm/v6/Leads", params={
-        "fields": "Full_Name", "page": "1", "per_page": "50"}).mock(
+        "fields": crm.DEFAULT_FIELDS["Leads"], "page": "1", "per_page": "50"}).mock(
         return_value=httpx.Response(200, json={"data": "oops"}))
     with pytest.raises(ZohoAPIError, match="unexpected"):
-        await crm.list_records(client, "om", "Leads", ["Full_Name"])
+        await crm.list_records(client, "om", "Leads")
 
 
 # ---- error code allowlist --------------------------------------------------

@@ -4,12 +4,21 @@ import asyncio
 import httpx
 import pytest
 import respx
-from zoho_support import API, ENV_BOTH, TOKEN_URL, FakeClock, TokenMock, data_calls
+from zoho_support import (
+    API,
+    CONTACT_PARAMS,
+    ENV_BOTH,
+    LEAD_PARAMS,
+    TOKEN_URL,
+    FakeClock,
+    TokenMock,
+    data_calls,
+)
 
 from integrations.zoho.client import ZohoAPIError, ZohoClient, ZohoConfig
 
 LEAD = f"{API}/crm/v6/Leads/123"
-PARAMS = {"fields": "Full_Name"}
+PARAMS = LEAD_PARAMS
 OK = {"data": [{"id": "123"}]}
 CONCURRENCY = 11
 
@@ -62,10 +71,10 @@ async def test_concurrent_calls_after_expiry_mint_once(client, router, monkeypat
 async def test_orgs_do_not_block_each_other(client, router):
     token = TokenMock(router, delay=0.05)
     mock_lead(router, return_value=httpx.Response(200, json=OK))
-    router.get(f"{API}/crm/v6/Contacts/5", params=PARAMS).mock(
+    router.get(f"{API}/crm/v6/Contacts/5", params=CONTACT_PARAMS).mock(
         return_value=httpx.Response(200, json=OK))
     await asyncio.gather(get_lead(client),
-                         client.get("ado", "/crm/v6/Contacts/5", PARAMS))
+                         client.get("ado", "/crm/v6/Contacts/5", CONTACT_PARAMS))
     assert token.calls == 2
 
 
@@ -222,11 +231,11 @@ async def _slow_failure(request):
 
 async def test_backoff_is_per_org(client, router):
     router.post(TOKEN_URL).mock(side_effect=_om_fails_ado_works)
-    router.get(f"{API}/crm/v6/Contacts/5", params=PARAMS).mock(
+    router.get(f"{API}/crm/v6/Contacts/5", params=CONTACT_PARAMS).mock(
         return_value=httpx.Response(200, json=OK))
     with pytest.raises(ZohoAPIError):
         await get_lead(client)
-    assert await client.get("ado", "/crm/v6/Contacts/5", PARAMS) == OK
+    assert await client.get("ado", "/crm/v6/Contacts/5", CONTACT_PARAMS) == OK
 
 
 def _om_fails_ado_works(request):
@@ -246,3 +255,76 @@ async def test_successful_mint_after_backoff_resets_state(client, router, monkey
     clock.advance(61)
     assert await get_lead(client) == OK
     assert await get_lead(client) == OK
+
+
+# ---- persistent invalid token: cooldown after the failed retry ---------------
+
+async def test_sequential_calls_with_persistent_invalid_token_stop_after_two_mints(
+        client, router):
+    token = TokenMock(router)
+    route = mock_lead(router, return_value=invalid_token())
+    for _ in range(CONCURRENCY):
+        with pytest.raises(ZohoAPIError):
+            await get_lead(client)
+    assert token.calls <= 2 and route.call_count <= 2
+
+
+async def test_cooldown_blocks_mints_and_data_requests_then_recovers(
+        client, router, monkeypatch):
+    clock = FakeClock(monkeypatch)
+    token = TokenMock(router)
+    route = mock_lead(router, return_value=invalid_token())
+    for _ in range(3):
+        with pytest.raises(ZohoAPIError):
+            await get_lead(client)
+    assert (token.calls, route.call_count) == (2, 2)
+    clock.advance(61)
+    route.mock(return_value=httpx.Response(200, json=OK))
+    assert await get_lead(client) == OK
+    assert token.calls == 3 and route.call_count == 3
+
+
+@pytest.mark.parametrize("code", [14, 57])
+async def test_books_persistent_invalid_token_also_cools_down(client, router, code):
+    token = TokenMock(router)
+    route = router.get(f"{API}/books/v3/estimates/9").mock(
+        return_value=httpx.Response(401, json={"code": code}))
+    for _ in range(CONCURRENCY):
+        with pytest.raises(ZohoAPIError):
+            await client.get("om", "/books/v3/estimates/9")
+    assert token.calls <= 2 and route.call_count <= 2
+
+
+async def test_concurrent_calls_with_persistent_invalid_token_mint_at_most_twice(
+        client, router):
+    token = TokenMock(router, delay=0.05)
+    mock_lead(router, return_value=invalid_token())
+    results = await asyncio.gather(*[get_lead(client) for _ in range(CONCURRENCY)],
+                                   return_exceptions=True)
+    assert all(isinstance(r, ZohoAPIError) for r in results)
+    assert token.calls <= 2
+    before = len(data_calls(router))
+    with pytest.raises(ZohoAPIError):
+        await get_lead(client)
+    assert len(data_calls(router)) == before and token.calls <= 2
+
+
+async def test_rejected_token_is_never_served_from_cache_again(client, router):
+    token = TokenMock(router)
+    mock_lead(router, return_value=invalid_token())
+    with pytest.raises(ZohoAPIError):
+        await get_lead(client)
+    assert token.calls == 2
+    # cooldown, and the rejected AT-om-2 must not be handed out either
+    with pytest.raises(ZohoAPIError, match="backing off"):
+        await client._tokens.get("om")
+
+
+async def test_cooldown_of_one_org_does_not_affect_the_other(client, router):
+    TokenMock(router)
+    mock_lead(router, return_value=invalid_token())
+    router.get(f"{API}/crm/v6/Contacts/5", params=CONTACT_PARAMS).mock(
+        return_value=httpx.Response(200, json=OK))
+    with pytest.raises(ZohoAPIError):
+        await get_lead(client)
+    assert await client.get("ado", "/crm/v6/Contacts/5", CONTACT_PARAMS) == OK

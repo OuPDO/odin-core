@@ -2,9 +2,19 @@
 import httpx
 import pytest
 import respx
-from zoho_support import API, ENV_BOTH, TokenMock, data_calls
+from zoho_support import (
+    API,
+    CONTACT_PARAMS,
+    ENV_BOTH,
+    LEAD_PARAMS,
+    TokenMock,
+    data_calls,
+)
 
 from integrations.zoho.client import ZohoClient, ZohoConfig, ZohoRequestError
+from integrations.zoho.validation import MODULE_FIELDS
+
+DEALS = MODULE_FIELDS["Deals"]
 
 NOTES_FIELDS = "Note_Title,Note_Content,Created_Time,Modified_Time,Owner"
 SEARCH = "/crm/v6/Leads/search"
@@ -49,7 +59,7 @@ REJECTED = [
     # page bounds, CRM 1..40, Books 1..100
     (SEARCH, {"word": "ab", "page": 0, "per_page": 50}),
     (SEARCH, {"word": "ab", "page": 41, "per_page": 50}),
-    (LIST, {"fields": "A", "page": 41, "per_page": 50}),
+    (LIST, {"fields": DEALS, "page": 41, "per_page": 50}),
     (NOTES, {"fields": NOTES_FIELDS, "page": 41, "per_page": 50}),
     (B_CONTACTS, {"search_text": "x", "page": 101, "per_page": 50}),
     (B_ESTIMATES, {"page": 0, "per_page": 50}),
@@ -57,8 +67,8 @@ REJECTED = [
     # per_page fixed at 50
     (SEARCH, {"word": "ab", "page": 1, "per_page": 51}),
     (SEARCH, {"word": "ab", "page": 1, "per_page": 200}),
-    (LIST, {"fields": "A", "page": 1, "per_page": 10}),
-    (LIST, {"fields": "A", "page": 1, "per_page": "50"}),
+    (LIST, {"fields": DEALS, "page": 1, "per_page": 10}),
+    (LIST, {"fields": DEALS, "page": 1, "per_page": "50"}),
     (B_ESTIMATES, {"page": 1, "per_page": 100}),
     (B_CONTACTS, {"search_text": "x", "page": 1, "per_page": 0}),
     # fields format and limits
@@ -106,16 +116,54 @@ ACCEPTED = [
     (SEARCH, _p(word="ab")), (SEARCH, _p(email="x" * 200)), (SEARCH, _p(phone="12")),
     (SEARCH, {"word": "ab", "page": 40, "per_page": 50}),
     (SEARCH, _p(criteria="(Full_Name:equals:Mü\\(ll\\)er\\,\\\\)")),
-    (SEARCH, _p(criteria="(Deal_Name:equals:ab)")),
-    (LIST, _p(fields="A")),
-    (LIST, _p(fields=",".join(f"F{i}" for i in range(50)))),
-    (GET, {"fields": "Full_Name,Owner"}),
+    (SEARCH, _p(criteria="(Company:equals:ab)")),
+    (LIST, _p(fields=DEALS)),
+    (GET, CONTACT_PARAMS),
     (NOTES, _p(fields=NOTES_FIELDS)),
     (B_CONTACTS, _p(search_text="x" * 100)),
     (B_CONTACTS, {"search_text": "x", "page": 100, "per_page": 50}),
     (B_ESTIMATES, PAGING),
     (B_ESTIMATES, _p(customer_id="123", status="draft")),
 ]
+
+
+CROSS_MODULE = [
+    # criteria fields are bound to their module
+    ("Leads", "Deal_Name"), ("Leads", "Account_Name"), ("Contacts", "Company"),
+    ("Contacts", "Deal_Name"), ("Accounts", "Full_Name"), ("Accounts", "Company"),
+    ("Deals", "Full_Name"), ("Deals", "Account_Name"),
+]
+# fields are bound to their module: anything but the module's own fixed list is rejected
+FIELD_ABUSE = [
+    "Description", "Description,Created_By", "Full_Name", MODULE_FIELDS["Leads"] + ",Description",
+    ",".join(MODULE_FIELDS["Leads"].split(",")[:-1]), "Created_By", "Owner.email",
+]
+
+
+@pytest.mark.parametrize("module,field", CROSS_MODULE)
+async def test_criteria_fields_are_bound_to_their_module(module, field, client, router):
+    token = TokenMock(router)
+    with pytest.raises(ZohoRequestError):
+        await client.get("om", f"/crm/v6/{module}/search", _p(criteria=f"({field}:equals:Acme)"))
+    assert token.calls == 0 and not data_calls(router)
+
+
+@pytest.mark.parametrize("fields", FIELD_ABUSE)
+@pytest.mark.parametrize("path,extra", [("/crm/v6/Leads", PAGING), ("/crm/v6/Leads/1", {})])
+async def test_crm_fields_must_equal_the_fixed_module_list(fields, path, extra, client, router):
+    token = TokenMock(router)
+    with pytest.raises(ZohoRequestError):
+        await client.get("om", path, {"fields": fields, **extra})
+    assert token.calls == 0 and not data_calls(router)
+
+
+@pytest.mark.parametrize("path", ["/crm/v6/Contacts", "/crm/v6/Deals/1", "/crm/v6/Accounts"])
+async def test_one_modules_field_list_is_not_valid_for_another(path, client, router):
+    token = TokenMock(router)
+    extra = PAGING if path.count("/") == 3 else {}
+    with pytest.raises(ZohoRequestError):
+        await client.get("om", path, {**LEAD_PARAMS, **extra})
+    assert token.calls == 0 and not data_calls(router)
 
 
 @pytest.mark.parametrize("path,params", ACCEPTED)

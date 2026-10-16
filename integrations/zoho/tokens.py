@@ -35,9 +35,12 @@ class TokenManager:
         self._http = http_factory
         self._cache: dict[str, tuple[str, float]] = {}
         self._blocked_until: dict[str, float] = {}
+        self._replacement: dict[str, str] = {}  # org -> token minted after an unconfirmed rejection
+        self._pending: dict[str, int] = {}  # org -> rejections since the last good response
         self._locks = {org: asyncio.Lock() for org in ORGS}
 
     async def get(self, org: str) -> str:
+        """Cached token, or mint one."""
         cached = self._fresh(org)
         if cached:
             return cached
@@ -55,6 +58,24 @@ class TokenManager:
         if cached and cached[0] == failed_token:
             del self._cache[org]
 
+    def rejected(self, org: str, token: str) -> bool:
+        """Zoho rejected `token`. Evict it; if it was itself a replacement for an earlier
+        rejected token, start the cooldown and return True (do not mint again)."""
+        self.invalidate(org, token)
+        self._pending[org] = self._pending.get(org, 0) + 1
+        if self._replacement.get(org) == token:
+            self.cool_down(org)
+            return True
+        return False
+
+    def confirmed(self, org: str) -> None:
+        """Zoho accepted a token: earlier rejections were a one-off (e.g. early revocation)."""
+        self._pending.pop(org, None)
+        self._replacement.pop(org, None)
+
+    def cool_down(self, org: str) -> None:
+        self._blocked_until[org] = time.monotonic() + MINT_BACKOFF_SECONDS
+
     def _fresh(self, org: str) -> str | None:
         cached = self._cache.get(org)
         if cached and time.monotonic() < cached[1]:
@@ -65,9 +86,11 @@ class TokenManager:
         try:
             token, ttl = await self._mint(org)
         except ZohoAPIError:
-            self._blocked_until[org] = time.monotonic() + MINT_BACKOFF_SECONDS
+            self.cool_down(org)
             raise
         self._blocked_until.pop(org, None)
+        if self._pending.get(org):
+            self._replacement[org] = token
         self._cache[org] = (token, time.monotonic() + ttl)
         return token
 

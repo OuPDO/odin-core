@@ -10,9 +10,14 @@ from urllib.parse import parse_qs
 
 import httpx
 
+from integrations.zoho.validation import MODULE_FIELDS
+
 ACCOUNTS = "https://accounts.zoho.eu"
 API = "https://www.zohoapis.eu"
 TOKEN_URL = f"{ACCOUNTS}/oauth/v2/token"
+
+LEAD_PARAMS = {"fields": MODULE_FIELDS["Leads"]}
+CONTACT_PARAMS = {"fields": MODULE_FIELDS["Contacts"]}
 
 BOOKS_ORG_ID = "900000000123"
 

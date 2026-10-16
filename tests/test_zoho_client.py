@@ -8,8 +8,10 @@ from zoho_support import (
     ACCOUNTS,
     API,
     BOOKS_ORG_ID,
+    CONTACT_PARAMS,
     ENV_BOTH,
     ENV_OM,
+    LEAD_PARAMS,
     SECRETS,
     TOKEN_URL,
     TokenMock,
@@ -24,9 +26,9 @@ from integrations.zoho.client import (
     strip_dollar_keys,
     validate_request,
 )
+from integrations.zoho.validation import MODULE_FIELDS
 
 LEAD = f"{API}/crm/v6/Leads/123"
-LEAD_PARAMS = {"fields": "Full_Name"}
 
 
 @pytest.fixture
@@ -80,8 +82,8 @@ async def test_bad_paths_rejected_before_network(path, client, router):
 
 @pytest.mark.parametrize("path,params", [
     ("/crm/v6/Leads/search", {"word": "ab", "page": 1, "per_page": 50}),
-    ("/crm/v6/Deals", {"fields": "Deal_Name", "page": 1, "per_page": 50}),
-    ("/crm/v6/Contacts/42", {"fields": "Full_Name"}),
+    ("/crm/v6/Deals", {"fields": MODULE_FIELDS["Deals"], "page": 1, "per_page": 50}),
+    ("/crm/v6/Contacts/42", CONTACT_PARAMS),
     ("/crm/v6/Accounts/42/Notes", {"fields": "Note_Title,Note_Content,Created_Time,"
                                              "Modified_Time,Owner", "page": 1, "per_page": 50}),
     ("/books/v3/contacts", {"search_text": "x", "page": 1, "per_page": 50}),
@@ -156,11 +158,11 @@ async def test_unconfigured_org_rejected_without_network(router):
 async def test_token_caches_are_separate_per_org(client, router):
     token = TokenMock(router)
     om = mock_lead(router, return_value=httpx.Response(200, json={"data": []}))
-    ado = router.get(f"{API}/crm/v6/Contacts/5", params=LEAD_PARAMS).mock(
+    ado = router.get(f"{API}/crm/v6/Contacts/5", params=CONTACT_PARAMS).mock(
         return_value=httpx.Response(200, json={"data": []}))
     for _ in range(2):
         await get_lead(client)
-        await client.get("ado", "/crm/v6/Contacts/5", LEAD_PARAMS)
+        await client.get("ado", "/crm/v6/Contacts/5", CONTACT_PARAMS)
     assert token.calls == 2
     assert om.calls[0].request.headers["authorization"] == "Zoho-oauthtoken AT-om-1"
     assert ado.calls[0].request.headers["authorization"] == "Zoho-oauthtoken AT-ado-2"

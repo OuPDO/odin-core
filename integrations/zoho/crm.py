@@ -4,9 +4,11 @@ Each function validates every caller-supplied value first, builds the request fr
 constants and returns a normalized result with continuation metadata
 (`page`, `more_records`). Nothing here can write.
 
-Data minimisation (the data goes to an external agent): get and list ask Zoho only for
-the per-module DEFAULT_FIELDS unless the caller names fields explicitly; search results
-are reduced to the same fields plus `id`; the record owner is reduced to its name.
+Data minimisation (the data goes to an external agent): callers cannot choose fields.
+Requests carry the fixed per-module field list; EVERY response (get, list, search, notes)
+is projected to that list plus `id`. Lookup objects (Owner, Account_Name, ...) are reduced
+to their `name`; lists and other nested values are dropped. Notes keep id, title, content,
+timestamps and the owner name.
 """
 from typing import Any
 
@@ -17,16 +19,17 @@ from integrations.zoho.validation import (
     CRM_MAX_PAGE,
     CRM_MAX_TEXT,
     CRM_MIN_TEXT,
+    MODULE_FIELDS,
     NOTES_FIELDS,
     PER_PAGE,
-    validate_fields_list,
     validate_id,
     validate_page,
     validate_text,
 )
 
-MODULES = ("Leads", "Contacts", "Deals", "Accounts")
+MODULES = tuple(MODULE_FIELDS)
 SEARCH_QUERY_KEYS = ("word", "email", "phone")
+DEFAULT_FIELDS = MODULE_FIELDS
 
 # Field searches are fixed per module; anything else is rejected before the network.
 FIELD_SEARCH = {
@@ -36,15 +39,9 @@ FIELD_SEARCH = {
     "Deals": {"name": "Deal_Name"},
 }
 
-DEFAULT_FIELDS = {
-    "Leads": ("First_Name,Last_Name,Full_Name,Company,Email,Phone,Mobile,Designation,"
-              "Lead_Status,Lead_Source,Owner,Created_Time,Modified_Time,Website,City"),
-    "Contacts": ("First_Name,Last_Name,Full_Name,Account_Name,Email,Phone,Mobile,Title,"
-                 "Lead_Source,Owner,Created_Time,Modified_Time,Mailing_City"),
-    "Deals": "Deal_Name,Stage,Amount,Closing_Date,Account_Name,Contact_Name,Owner",
-    "Accounts": ("Account_Name,Website,Phone,Billing_City,Owner,Created_Time,"
-                 "Modified_Time"),
-}
+_NOTE_KEEP = frozenset(NOTES_FIELDS.split(",")) | {"id"}
+_MODULE_KEEP = {module: frozenset(fields.split(",")) | {"id"}
+                for module, fields in MODULE_FIELDS.items()}
 
 
 def _module(value: Any) -> str:
@@ -71,25 +68,24 @@ def _search_params(module: str, by: Any, value: Any) -> dict:
     return {"criteria": f"({field_name}:equals:{_escape_criteria(text)})"}
 
 
-def _slim_owner(record: dict) -> dict:
-    owner = record.get("Owner")
-    if isinstance(owner, dict):
-        return {**record, "Owner": {"name": owner.get("name")}}
-    return record
-
-
-def _records(raw: dict | None, keep: frozenset[str] | None = None) -> list[dict]:
-    out = []
-    for record in list_of_dicts(raw or {}, "data"):
-        if keep is not None:
-            record = {k: v for k, v in record.items() if k in keep}
-        out.append(_slim_owner(record))
+def _project(record: dict, keep: frozenset[str]) -> dict:
+    """Allowlisted keys only; objects shrink to their name, lists and other nesting vanish."""
+    out: dict[str, Any] = {}
+    for key, value in record.items():
+        if key not in keep:
+            continue
+        if isinstance(value, dict):
+            out[key] = {"name": value.get("name")}
+        elif not isinstance(value, list):
+            out[key] = value
     return out
 
 
-def _normalize(raw: dict | None, page: int, keep: frozenset[str] | None = None) -> dict:
-    info = context(raw or {}, "info")
-    return {"data": _records(raw, keep), "page": int_or(info.get("page"), page),
+def _normalize(raw: dict | None, page: int, keep: frozenset[str]) -> dict:
+    raw = raw or {}
+    info = context(raw, "info")
+    return {"data": [_project(r, keep) for r in list_of_dicts(raw, "data")],
+            "page": int_or(info.get("page"), page),
             "more_records": bool(info.get("more_records", False))}
 
 
@@ -98,26 +94,23 @@ async def search(client: ZohoClient, org: str, module: str, by: str, value: str,
     module = _module(module)
     params = _search_params(module, by, value)
     params.update(page=validate_page(page, CRM_MAX_PAGE), per_page=PER_PAGE)
-    keep = frozenset(DEFAULT_FIELDS[module].split(",")) | {"id"}
     raw = await client.get(org, f"/crm/v6/{module}/search", params)
-    return _normalize(raw, params["page"], keep)
+    return _normalize(raw, params["page"], _MODULE_KEEP[module])
 
 
-async def get_record(client: ZohoClient, org: str, module: str, record_id: str,
-                     fields: list[str] | None = None) -> dict:
+async def get_record(client: ZohoClient, org: str, module: str, record_id: str) -> dict:
     module = _module(module)
     path = f"/crm/v6/{module}/{validate_id(record_id)}"
-    field_param = DEFAULT_FIELDS[module] if fields is None else validate_fields_list(fields)
-    return {"data": _records(await client.get(org, path, {"fields": field_param}))}
+    raw = await client.get(org, path, {"fields": MODULE_FIELDS[module]})
+    return {"data": _normalize(raw, 1, _MODULE_KEEP[module])["data"]}
 
 
-async def list_records(client: ZohoClient, org: str, module: str,
-                       fields: list[str] | None = None, page: int = 1) -> dict:
+async def list_records(client: ZohoClient, org: str, module: str, page: int = 1) -> dict:
     module = _module(module)
-    field_param = DEFAULT_FIELDS[module] if fields is None else validate_fields_list(fields)
     page = validate_page(page, CRM_MAX_PAGE)
-    params = {"fields": field_param, "page": page, "per_page": PER_PAGE}
-    return _normalize(await client.get(org, f"/crm/v6/{module}", params), page)
+    params = {"fields": MODULE_FIELDS[module], "page": page, "per_page": PER_PAGE}
+    raw = await client.get(org, f"/crm/v6/{module}", params)
+    return _normalize(raw, page, _MODULE_KEEP[module])
 
 
 async def list_notes(client: ZohoClient, org: str, module: str, record_id: str,
@@ -126,4 +119,4 @@ async def list_notes(client: ZohoClient, org: str, module: str, record_id: str,
     path = f"/crm/v6/{module}/{validate_id(record_id)}/Notes"
     page = validate_page(page, CRM_MAX_PAGE)
     params = {"fields": NOTES_FIELDS, "page": page, "per_page": PER_PAGE}
-    return _normalize(await client.get(org, path, params), page)
+    return _normalize(await client.get(org, path, params), page, _NOTE_KEEP)

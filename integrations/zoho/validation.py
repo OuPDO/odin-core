@@ -18,22 +18,37 @@ BOOKS_MAX_PAGE = 100
 CRM_MIN_TEXT = 2
 CRM_MAX_TEXT = 200
 BOOKS_MAX_TEXT = 100
-MAX_FIELDS = 50
 NOTES_FIELDS = "Note_Title,Note_Content,Created_Time,Modified_Time,Owner"
 ESTIMATE_STATUSES = ("draft", "sent", "invoiced", "accepted", "declined", "expired")
-CRITERIA_FIELDS = ("Full_Name", "Company", "Account_Name", "Deal_Name")
+
+# Callers cannot choose CRM fields: every request carries exactly this list for its module,
+# and responses are projected to it (see crm.py). Names are standard Zoho API names.
+MODULE_FIELDS = {
+    "Leads": ("First_Name,Last_Name,Full_Name,Company,Email,Phone,Mobile,Designation,"
+              "Lead_Status,Lead_Source,Owner,Created_Time,Modified_Time,Website,City"),
+    "Contacts": ("First_Name,Last_Name,Full_Name,Account_Name,Email,Phone,Mobile,Title,"
+                 "Lead_Source,Owner,Created_Time,Modified_Time,Mailing_City"),
+    "Deals": "Deal_Name,Stage,Amount,Closing_Date,Account_Name,Contact_Name,Owner",
+    "Accounts": "Account_Name,Website,Phone,Billing_City,Owner,Created_Time,Modified_Time",
+}
+# Search by field is fixed per module.
+MODULE_CRITERIA = {
+    "Leads": ("Full_Name", "Company"),
+    "Contacts": ("Full_Name", "Account_Name"),
+    "Accounts": ("Account_Name",),
+    "Deals": ("Deal_Name",),
+}
+_ALL_CRITERIA_FIELDS = ("Full_Name", "Company", "Account_Name", "Deal_Name")
 
 _ID_RE = re.compile(r"[0-9]{1,25}")
-_FIELD_NAME = r"[A-Za-z0-9_]{1,64}"
-_FIELD_NAME_RE = re.compile(_FIELD_NAME)
-_FIELDS_RE = re.compile(rf"{_FIELD_NAME}(?:,{_FIELD_NAME}){{0,{MAX_FIELDS - 1}}}")
 _CRITERIA_RE = re.compile(
-    rf"\(({'|'.join(CRITERIA_FIELDS)}):equals:((?:\\[\\(),]|[^\\(),])+)\)")
+    rf"\(({'|'.join(_ALL_CRITERIA_FIELDS)}):equals:((?:\\[\\(),]|[^\\(),])+)\)")
 _UNESCAPE_RE = re.compile(r"\\([\\(),])")
-_MODULES = "Leads|Contacts|Deals|Accounts"
+_MODULES = "(?P<module>Leads|Contacts|Deals|Accounts)"
 _ID = "[0-9]{1,25}"
 
 Validator = Callable[[Any], Any]
+ModuleValidator = Callable[[str, Any], Any]
 
 
 def is_id(value: Any) -> bool:
@@ -67,22 +82,6 @@ def validate_text(value: Any, what: str, min_len: int, max_len: int) -> str:
     return value
 
 
-def validate_fields_string(value: Any) -> str:
-    if not isinstance(value, str) or not _FIELDS_RE.fullmatch(value):
-        raise ZohoRequestError(
-            f"fields must be 1 to {MAX_FIELDS} names of letters, digits and underscore")
-    return value
-
-
-def validate_fields_list(fields: Any) -> str:
-    """Caller-supplied field list -> comma separated string (validated)."""
-    if not isinstance(fields, (list, tuple)) or not 1 <= len(fields) <= MAX_FIELDS:
-        raise ZohoRequestError(f"fields must be a list of 1 to {MAX_FIELDS} field names")
-    for name in fields:
-        if not isinstance(name, str) or not _FIELD_NAME_RE.fullmatch(name):
-            raise ZohoRequestError("field names may only contain letters, digits and underscore")
-    return validate_fields_string(",".join(fields))
-
 
 def validate_notes_fields(value: Any) -> str:
     if value != NOTES_FIELDS:
@@ -97,6 +96,19 @@ def validate_criteria(value: Any) -> str:
         raise ZohoRequestError("criteria must be (Field:equals:escaped value) for a known field")
     validate_text(_UNESCAPE_RE.sub(r"\1", match.group(2)), "criteria value",
                   CRM_MIN_TEXT, CRM_MAX_TEXT)
+    return value
+
+
+def module_fields(module: str, value: Any) -> str:
+    if value != MODULE_FIELDS[module]:
+        raise ZohoRequestError(f"fields for {module} are fixed")
+    return value
+
+
+def module_criteria(module: str, value: Any) -> str:
+    match = _CRITERIA_RE.fullmatch(value)  # value already passed validate_criteria
+    if match is None or match.group(1) not in MODULE_CRITERIA[module]:
+        raise ZohoRequestError(f"criteria field not allowed for {module}")
     return value
 
 
@@ -117,6 +129,7 @@ class Endpoint:
     required: frozenset[str] = frozenset()
     exactly_one_of: frozenset[str] = frozenset()
     books: bool = False
+    module_rules: Mapping[str, ModuleValidator] | None = None  # bound to the path's module
 
 
 _crm_text = partial(validate_text, what="search value", min_len=CRM_MIN_TEXT,
@@ -130,20 +143,26 @@ _PAGING_KEYS = frozenset({"page", "per_page"})
 
 
 def _ep(pattern: str, rules: Mapping[str, Validator], required: tuple = (),
-        one_of: frozenset = frozenset(), books: bool = False) -> Endpoint:
-    return Endpoint(re.compile(pattern), rules, frozenset(required), one_of, books)
+        one_of: frozenset = frozenset(), books: bool = False,
+        module_rules: Mapping[str, ModuleValidator] | None = None) -> Endpoint:
+    return Endpoint(re.compile(pattern), rules, frozenset(required), one_of, books,
+                    module_rules)
 
+
+_ANY = str  # the module-bound rule does the real check; the generic rule only types the value
 
 ALLOWED_ENDPOINTS = (
-    _ep(rf"/crm/v6/(?:{_MODULES})/search",
+    _ep(rf"/crm/v6/{_MODULES}/search",
         {"word": _crm_text, "email": _crm_text, "phone": _crm_text,
          "criteria": validate_criteria, **_CRM_PAGING},
-        required=_PAGING_KEYS, one_of=_SEARCH_KEYS),
-    _ep(rf"/crm/v6/(?:{_MODULES})",
-        {"fields": validate_fields_string, **_CRM_PAGING}, required={"fields"} | _PAGING_KEYS),
-    _ep(rf"/crm/v6/(?:{_MODULES})/{_ID}", {"fields": validate_fields_string},
-        required=("fields",)),
-    _ep(rf"/crm/v6/(?:{_MODULES})/{_ID}/Notes",
+        required=_PAGING_KEYS, one_of=_SEARCH_KEYS,
+        module_rules={"criteria": module_criteria}),
+    _ep(rf"/crm/v6/{_MODULES}",
+        {"fields": _ANY, **_CRM_PAGING}, required={"fields"} | _PAGING_KEYS,
+        module_rules={"fields": module_fields}),
+    _ep(rf"/crm/v6/{_MODULES}/{_ID}", {"fields": _ANY}, required=("fields",),
+        module_rules={"fields": module_fields}),
+    _ep(rf"/crm/v6/{_MODULES}/{_ID}/Notes",
         {"fields": validate_notes_fields, **_CRM_PAGING}, required={"fields"} | _PAGING_KEYS),
     _ep("/books/v3/contacts",
         {"search_text": partial(validate_text, what="search_text", min_len=1,
@@ -163,14 +182,15 @@ def validate_request(method: str, path: str, params: Mapping[str, Any]) -> Endpo
         raise ZohoRequestError("only GET requests are allowed")
     if not isinstance(path, str):
         raise ZohoRequestError("path not allowed")
-    endpoint = next((e for e in ALLOWED_ENDPOINTS if e.pattern.fullmatch(path)), None)
-    if endpoint is None:
-        raise ZohoRequestError("path not allowed")
-    _validate_query(endpoint, params)
-    return endpoint
+    for endpoint in ALLOWED_ENDPOINTS:
+        match = endpoint.pattern.fullmatch(path)
+        if match:
+            _validate_query(endpoint, params, match.groupdict().get("module"))
+            return endpoint
+    raise ZohoRequestError("path not allowed")
 
 
-def _validate_query(endpoint: Endpoint, params: Mapping[str, Any]) -> None:
+def _validate_query(endpoint: Endpoint, params: Mapping[str, Any], module: str | None) -> None:
     for key, value in params.items():
         rule = endpoint.rules.get(key)
         if rule is None:
@@ -178,6 +198,9 @@ def _validate_query(endpoint: Endpoint, params: Mapping[str, Any]) -> None:
         if isinstance(value, bool) or not isinstance(value, (str, int)):
             raise ZohoRequestError(f"query parameter has invalid type: {key}")
         rule(value)
+        bound = (endpoint.module_rules or {}).get(key)
+        if bound and module:
+            bound(module, value)
     missing = endpoint.required - params.keys()
     if missing:
         raise ZohoRequestError(f"missing query parameter: {min(missing)}")

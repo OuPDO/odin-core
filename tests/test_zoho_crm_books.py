@@ -182,60 +182,6 @@ async def test_get_record_defaults_to_the_field_allowlist(client, router):
     assert out == {"data": [{"id": "4711", "Full_Name": "X"}]}
 
 
-async def test_get_record_accepts_validated_custom_fields(client, router):
-    route = _ok(router, "/crm/v6/Deals/1", {"fields": "Deal_Name,Stage"}, {"data": [{"id": "1"}]})
-    await crm.get_record(client, "om", "Deals", "1", fields=["Deal_Name", "Stage"])
-    assert _params(route) == {"fields": "Deal_Name,Stage"}
-
-
-@pytest.mark.parametrize("fields", [["A,B"], ["a b"], ["a&b=1"], [""], ["a" * 65], ["a-b"],
-                                    ["x"] * 51, "Full_Name", [1], ["Owner.id"], []])
-async def test_get_record_rejects_bad_fields(client, router, fields):
-    with pytest.raises(ZohoRequestError):
-        await crm.get_record(client, "om", "Leads", "1", fields=fields)
-    assert not data_calls(router)
-
-
-async def test_default_fields_are_minimal_per_module():
-    assert crm.DEFAULT_FIELDS["Deals"] == (
-        "Deal_Name,Stage,Amount,Closing_Date,Account_Name,Contact_Name,Owner")
-    sensitive = {"Description", "Date_of_Birth", "Mailing_Street", "Street", "Skype_ID",
-                 "Secondary_Email", "Twitter", "Billing_Street", "Home_Phone"}
-    for module in crm.MODULES:
-        fields = set(crm.DEFAULT_FIELDS[module].split(","))
-        assert not fields & sensitive, module
-        assert "Owner" in fields and len(fields) <= 20
-    for module in ("Leads", "Contacts"):
-        fields = set(crm.DEFAULT_FIELDS[module].split(","))
-        assert {"Full_Name", "Email", "Phone", "Mobile", "Created_Time", "Modified_Time"} <= fields
-
-
-async def test_list_records_default_and_custom_fields(client, router):
-    body = {"data": [{"id": "1"}], "info": {"page": 2, "more_records": True, "per_page": 50}}
-    route = _ok(router, "/crm/v6/Deals", {"fields": "Deal_Name,Stage", **_paging(2)}, body)
-    out = await crm.list_records(client, "om", "Deals", fields=["Deal_Name", "Stage"], page=2)
-    assert _params(route) == {"fields": "Deal_Name,Stage", "page": "2", "per_page": "50"}
-    assert out == {"data": [{"id": "1"}], "page": 2, "more_records": True}
-    route = _ok(router, "/crm/v6/Deals", {"fields": crm.DEFAULT_FIELDS["Deals"], **_paging()})
-    await crm.list_records(client, "om", "Deals")
-    assert _params(route)["fields"] == crm.DEFAULT_FIELDS["Deals"]
-
-
-@pytest.mark.parametrize("fields", [["A,B"], ["a b"], ["a&b=1"], [""], ["a" * 65], ["a-b"],
-                                    ["x"] * 51, "Full_Name", [1], ["Owner.id"], []])
-async def test_bad_fields_rejected(client, router, fields):
-    with pytest.raises(ZohoRequestError):
-        await crm.list_records(client, "om", "Leads", fields=fields)
-    assert not data_calls(router)
-
-
-async def test_fifty_fields_allowed(client, router):
-    names = [f"F{i}" for i in range(50)]
-    route = _ok(router, "/crm/v6/Leads", {"fields": ",".join(names), **_paging()})
-    await crm.list_records(client, "om", "Leads", fields=names)
-    assert len(_params(route)["fields"].split(",")) == 50
-
-
 async def test_list_notes_sends_the_fixed_field_list(client, router):
     route = _ok(router, "/crm/v6/Accounts/55/Notes", {"fields": NOTES_FIELDS, **_paging()}, {
         "data": [{"id": "n1", "Note_Content": "hi", "Owner": {"name": "D", "id": "1"}}],
@@ -256,9 +202,9 @@ async def test_upstream_error_becomes_clean_error(client, router):
 @pytest.mark.parametrize("body", [{"data": "x"}, {"data": {"id": "1"}}, {"data": [1, 2]},
                                   {"data": [{"id": "1"}], "info": "bad"}])
 async def test_crm_unexpected_shapes_are_clean_errors(client, router, body):
-    _ok(router, "/crm/v6/Leads", {"fields": "Full_Name", **_paging()}, body)
+    _ok(router, "/crm/v6/Leads", {"fields": crm.DEFAULT_FIELDS["Leads"], **_paging()}, body)
     with pytest.raises(ZohoAPIError, match="unexpected"):
-        await crm.list_records(client, "om", "Leads", ["Full_Name"])
+        await crm.list_records(client, "om", "Leads")
 
 
 # ---- Books -----------------------------------------------------------------

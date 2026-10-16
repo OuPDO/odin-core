@@ -115,11 +115,21 @@ class ZohoClient:
                               query: dict) -> dict | None:
         token = await self._tokens.get(org)
         status, body = await self._send(token, path, query)
-        if status == 401 and _is_invalid_token(body, endpoint.books):
-            self._tokens.invalidate(org, token)
+        if self._token_rejected(status, body, endpoint) and not self._tokens.rejected(org, token):
+            # not a failed replacement: mint one fresh token and retry once
             token = await self._tokens.get(org)
             status, body = await self._send(token, path, query)
+            if self._token_rejected(status, body, endpoint):
+                # the retry token is rejected too: evict it and stop hammering Zoho
+                self._tokens.rejected(org, token)
+                self._tokens.cool_down(org)
+        if status in (200, 204):
+            self._tokens.confirmed(org)
         return self._parse(status, body)
+
+    @staticmethod
+    def _token_rejected(status: int, body: bytes, endpoint: Endpoint) -> bool:
+        return status == 401 and _is_invalid_token(body, endpoint.books)
 
     def _resolve_org(self, org: str, endpoint: Endpoint) -> str:
         if endpoint.books:
