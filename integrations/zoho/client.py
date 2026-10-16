@@ -124,7 +124,7 @@ class ZohoClient:
                 self._tokens.rejected(org, token)
                 self._tokens.cool_down(org)
         if status in (200, 204):
-            self._tokens.confirmed(org)
+            self._tokens.confirmed(org, token)
         return self._parse(status, body)
 
     @staticmethod

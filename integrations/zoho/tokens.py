@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import time
+from collections import deque
 from collections.abc import Callable
 from typing import Any
 
@@ -18,6 +19,8 @@ MAX_TTL_SECONDS = 50 * 60
 EXPIRY_MARGIN_SECONDS = 300
 DEFAULT_EXPIRES_IN = 3600
 MINT_BACKOFF_SECONDS = 60
+MINT_BUDGET = 5  # hard cap per org and rolling window (Zoho allows 10 per 10 minutes)
+MINT_WINDOW_SECONDS = 600
 
 
 def ttl_for(expires_in: Any) -> float:
@@ -38,6 +41,7 @@ class TokenManager:
         self._replacement: dict[str, str] = {}  # org -> token minted after an unconfirmed rejection
         self._pending: dict[str, int] = {}  # org -> rejections since the last good response
         self._locks = {org: asyncio.Lock() for org in ORGS}
+        self._mint_times: dict[str, deque[float]] = {org: deque() for org in ORGS}
 
     async def get(self, org: str) -> str:
         """Cached token, or mint one."""
@@ -68,10 +72,13 @@ class TokenManager:
             return True
         return False
 
-    def confirmed(self, org: str) -> None:
-        """Zoho accepted a token: earlier rejections were a one-off (e.g. early revocation)."""
-        self._pending.pop(org, None)
-        self._replacement.pop(org, None)
+    def confirmed(self, org: str, token: str) -> None:
+        """Zoho accepted `token`. Only success for the currently cached token clears the
+        failure state; a late success for an older token says nothing about its replacement."""
+        cached = self._cache.get(org)
+        if cached and cached[0] == token:
+            self._pending.pop(org, None)
+            self._replacement.pop(org, None)
 
     def cool_down(self, org: str) -> None:
         self._blocked_until[org] = time.monotonic() + MINT_BACKOFF_SECONDS
@@ -82,7 +89,18 @@ class TokenManager:
             return cached[0]
         return None
 
+    def _spend_mint_budget(self, org: str) -> None:
+        """Hard cap, independent of every other state: refuse before contacting Zoho."""
+        now = time.monotonic()
+        times = self._mint_times[org]
+        while times and now - times[0] >= MINT_WINDOW_SECONDS:
+            times.popleft()
+        if len(times) >= MINT_BUDGET:
+            raise ZohoAPIError("Zoho token refresh refused (token_rate_limited)")
+        times.append(now)
+
     async def _refresh(self, org: str) -> str:
+        self._spend_mint_budget(org)  # failed attempts count too
         try:
             token, ttl = await self._mint(org)
         except ZohoAPIError:
