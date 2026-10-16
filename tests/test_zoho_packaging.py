@@ -44,7 +44,7 @@ def test_install_into_fresh_venv_and_import_from_outside(tmp_path):
     subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True)
     py = venv / "bin" / "python"
     pip = [str(py), "-m", "pip", "install", "--quiet", "--disable-pip-version-check"]
-    subprocess.run([*pip, "httpx"], check=True, timeout=600)
+    subprocess.run([*pip, "httpx", "mcp>=1.2.0,<2"], check=True, timeout=600)
     subprocess.run([*pip, "--no-deps", str(src)], check=True, timeout=600)
     outside = tmp_path / "elsewhere"
     outside.mkdir()
